@@ -3,11 +3,12 @@ import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import { File } from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Animated,
+  Easing,
   Image,
   Pressable,
   ScrollView,
@@ -24,12 +25,17 @@ import {
 } from '../database/iosDatabase';
 import { analyzeCameraFrame } from '../services/moodAiService';
 import {
-  Colors,
   emotionToMood,
   EmotionType,
   MoodType,
   resolveMoodVisual,
+  ThemePalette,
 } from '../theme/colors';
+import { useTheme } from '../theme/ThemeContext';
+
+function isFrontCameraSession(deviceLabel?: string | null): boolean {
+  return Boolean(deviceLabel && deviceLabel.toLowerCase().includes('ön kamera'));
+}
 
 function deleteTempUriQuietly(uri: string | null | undefined): void {
   if (!uri || !uri.startsWith('file://')) return;
@@ -74,6 +80,9 @@ export const CameraStudioScreen: React.FC<Props> = ({
   onToggleFavorite,
   onCatalogExpanded,
 }) => {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const [permission, requestPermission] = useCameraPermissions();
   const [cameraOpen, setCameraOpen] = useState(true);
   const [cameraReady, setCameraReady] = useState(false);
@@ -107,6 +116,58 @@ export const CameraStudioScreen: React.FC<Props> = ({
     ts: 0,
   });
   const flashOpacity = useRef(new Animated.Value(0)).current;
+  const hudScale = useRef(new Animated.Value(1)).current;
+  const playlistOpacity = useRef(new Animated.Value(1)).current;
+  const playlistTranslateY = useRef(new Animated.Value(0)).current;
+  const playlistScale = useRef(new Animated.Value(1)).current;
+
+  // Smooth pulse on live mood HUD whenever detected emotion changes
+  useEffect(() => {
+    if (!liveEmotion) return;
+    Animated.sequence([
+      Animated.timing(hudScale, {
+        toValue: 1.06,
+        duration: 130,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.spring(hudScale, {
+        toValue: 1,
+        damping: 14,
+        stiffness: 200,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [hudScale, liveEmotion]);
+
+  // Smooth downward slide-in when a new photo scan session appears
+  useEffect(() => {
+    if (!activeSession?.id) return;
+    playlistOpacity.setValue(0);
+    playlistTranslateY.setValue(-34);
+    playlistScale.setValue(0.95);
+    Animated.parallel([
+      Animated.timing(playlistOpacity, {
+        toValue: 1,
+        duration: 380,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.spring(playlistTranslateY, {
+        toValue: 0,
+        damping: 18,
+        stiffness: 150,
+        mass: 0.8,
+        useNativeDriver: true,
+      }),
+      Animated.spring(playlistScale, {
+        toValue: 1,
+        damping: 18,
+        stiffness: 160,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [activeSession?.id, playlistOpacity, playlistScale, playlistTranslateY]);
 
   // Live mood detection loop on iPhone 16 Pro camera stream
   const runLiveDetectionTick = useCallback(async () => {
@@ -472,12 +533,12 @@ export const CameraStudioScreen: React.FC<Props> = ({
           )}
 
           {/* TOP-RIGHT LIVE MOOD HUD (Core Requirement: Sağ Yukarıda Canlı Mod Göstergesi) */}
-          <View style={styles.liveMoodHud}>
+          <Animated.View style={[styles.liveMoodHud, { transform: [{ scale: hudScale }] }]}>
             <View
               style={[
                 styles.liveMoodDot,
                 liveMood
-                  ? { backgroundColor: resolveMoodVisual(liveMood, liveEmotion).dotColor }
+                  ? { backgroundColor: resolveMoodVisual(liveMood, liveEmotion, colors).dotColor }
                   : null,
               ]}
             />
@@ -487,7 +548,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
                 {permission?.granted && cameraOpen ? liveStatusText : 'Kamera Kapalı'}
               </Text>
             </View>
-          </View>
+          </Animated.View>
 
           {/* Shutter Flash */}
           <Animated.View
@@ -542,12 +603,24 @@ export const CameraStudioScreen: React.FC<Props> = ({
 
       {/* ACTIVE SESSION RECOMMENDED PLAYLIST */}
       {activeSession && (() => {
-        const activeMeta = resolveMoodVisual(activeSession.mood, activeSession.emotion);
+        const activeMeta = resolveMoodVisual(activeSession.mood, activeSession.emotion, colors);
+        const mirrored = isFrontCameraSession(activeSession.deviceLabel);
         return (
-          <View style={styles.playlistCard}>
+          <Animated.View
+            style={[
+              styles.playlistCard,
+              {
+                opacity: playlistOpacity,
+                transform: [{ translateY: playlistTranslateY }, { scale: playlistScale }],
+              },
+            ]}
+          >
             <View style={styles.sessionBanner}>
               {activeSession.snapshotUri ? (
-                <Image source={{ uri: activeSession.snapshotUri }} style={styles.snapThumb} />
+                <Image
+                  source={{ uri: activeSession.snapshotUri }}
+                  style={[styles.snapThumb, mirrored && styles.mirroredImage]}
+                />
               ) : (
                 <View style={[styles.snapThumb, styles.snapFallback]}>
                   <Ionicons name="sparkles" size={22} color={activeMeta.color} />
@@ -595,7 +668,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
                 disabled={refreshingPlaylist}
                 style={styles.refreshOnlineBtn}
               >
-                <Ionicons name="refresh" size={14} color={Colors.brand} />
+                <Ionicons name="refresh" size={14} color={colors.brand} />
                 <Text style={styles.refreshOnlineText}>
                   {refreshingPlaylist ? 'Çekiliyor…' : 'İnternetten Yenile'}
                 </Text>
@@ -604,15 +677,17 @@ export const CameraStudioScreen: React.FC<Props> = ({
 
             {visibleTracks.map((tr, idx) => (
               <TrackRow
-                key={tr.id}
+                key={`${activeSession.id}-${tr.id}`}
                 track={tr}
+                index={idx}
+                animationKey={activeSession.id}
                 isActiveTrack={playingTrackId === tr.id}
                 isPlaying={playingTrackId === tr.id && isAudioPlaying}
                 onPlayPress={() => onPlayTrack(visibleTracks, idx)}
                 onToggleFavorite={() => onToggleFavorite(tr.id)}
               />
             ))}
-          </View>
+          </Animated.View>
         );
       })()}
 
@@ -632,7 +707,8 @@ export const CameraStudioScreen: React.FC<Props> = ({
         ) : (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 11 }}>
             {recentScans.slice(0, 8).map((scan) => {
-              const meta = resolveMoodVisual(scan.mood, scan.emotion);
+              const meta = resolveMoodVisual(scan.mood, scan.emotion, colors);
+              const scanMirrored = isFrontCameraSession(scan.deviceLabel);
               return (
                 <Pressable
                   key={scan.id}
@@ -646,7 +722,10 @@ export const CameraStudioScreen: React.FC<Props> = ({
                   ]}
                 >
                   {scan.snapshotUri ? (
-                    <Image source={{ uri: scan.snapshotUri }} style={styles.recentMiniThumb} />
+                    <Image
+                      source={{ uri: scan.snapshotUri }}
+                      style={[styles.recentMiniThumb, scanMirrored && styles.mirroredImage]}
+                    />
                   ) : (
                     <View style={[styles.recentMiniThumb, styles.snapFallback]}>
                       <Ionicons name="musical-note" size={18} color={meta.color} />
@@ -671,402 +750,408 @@ export const CameraStudioScreen: React.FC<Props> = ({
   );
 };
 
-const styles = StyleSheet.create({
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 150,
-  },
-  greetingBlock: {
-    marginBottom: 14,
-  },
-  pageTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    letterSpacing: -0.6,
-    color: Colors.inkPrimary,
-  },
-  pageSub: {
-    marginTop: 4,
-    fontSize: 13.5,
-    color: Colors.inkSecondary,
-    lineHeight: 19,
-  },
-  cameraCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 24,
-    padding: 11,
-    borderWidth: 1,
-    borderColor: Colors.hairline,
-    shadowColor: '#181D25',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.08,
-    shadowRadius: 22,
-    elevation: 5,
-  },
-  viewport: {
-    width: '100%',
-    aspectRatio: 3 / 4,
-    borderRadius: 18,
-    overflow: 'hidden',
-    backgroundColor: Colors.cameraBg,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  permissionBox: {
-    paddingHorizontal: 26,
-    alignItems: 'center',
-  },
-  permIconWrap: {
-    width: 60,
-    height: 60,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 14,
-  },
-  permTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#FFFFFF',
-    textAlign: 'center',
-  },
-  permDesc: {
-    marginTop: 6,
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.72)',
-    textAlign: 'center',
-    lineHeight: 18,
-    marginBottom: 18,
-  },
-  permBtnRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  startCamBtn: {
-    backgroundColor: Colors.brand,
-    paddingHorizontal: 18,
-    paddingVertical: 11,
-    borderRadius: 12,
-  },
-  startCamBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 13.5,
-  },
-  secondaryCamBtn: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    paddingHorizontal: 16,
-    paddingVertical: 11,
-    borderRadius: 12,
-  },
-  secondaryCamBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '600',
-    fontSize: 13.5,
-  },
-  topLeftPill: {
-    position: 'absolute',
-    top: 14,
-    left: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(14, 16, 22, 0.65)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  recDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: '#FF4D4D',
-  },
-  recText: {
-    color: '#FFFFFF',
-    fontSize: 10.5,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  liveMoodHud: {
-    position: 'absolute',
-    top: 14,
-    right: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    backgroundColor: Colors.hudGlass,
-    paddingHorizontal: 13,
-    paddingVertical: 8,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-  },
-  liveMoodDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: 'rgba(255,255,255,0.45)',
-  },
-  liveHudEyebrow: {
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.7,
-    color: 'rgba(255,255,255,0.65)',
-  },
-  liveHudValue: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  reticle: {
-    position: 'absolute',
-  },
-  corner: {
-    position: 'absolute',
-    width: 18,
-    height: 18,
-    borderColor: 'rgba(255,255,255,0.88)',
-  },
-  cTL: { top: 0, left: 0, borderTopWidth: 2.5, borderLeftWidth: 2.5, borderTopLeftRadius: 8 },
-  cTR: { top: 0, right: 0, borderTopWidth: 2.5, borderRightWidth: 2.5, borderTopRightRadius: 8 },
-  cBL: { bottom: 0, left: 0, borderBottomWidth: 2.5, borderLeftWidth: 2.5, borderBottomLeftRadius: 8 },
-  cBR: { bottom: 0, right: 0, borderBottomWidth: 2.5, borderRightWidth: 2.5, borderBottomRightRadius: 8 },
-  flashOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#FFFFFF',
-  },
-  cameraBottomBar: {
-    position: 'absolute',
-    bottom: 16,
-    left: 22,
-    right: 22,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  auxCircleBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(14, 16, 22, 0.62)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.22)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  shutterOuter: {
-    width: 74,
-    height: 74,
-    borderRadius: 37,
-    borderWidth: 4,
-    borderColor: '#FFFFFF',
-    padding: 5,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  shutterInner: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 30,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  shutterInnerBusy: {
-    backgroundColor: Colors.brand,
-  },
-  cameraFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 6,
-    paddingTop: 10,
-    paddingBottom: 2,
-    gap: 10,
-  },
-  footerHint: {
-    flex: 1,
-    fontSize: 12,
-    color: Colors.inkMuted,
-  },
-  toggleCamLink: {
-    fontSize: 12.5,
-    fontWeight: '700',
-    color: Colors.brand,
-  },
-  playlistCard: {
-    marginTop: 18,
-    backgroundColor: Colors.surface,
-    borderRadius: 24,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: Colors.hairline,
-    shadowColor: '#181D25',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.06,
-    shadowRadius: 20,
-    elevation: 4,
-  },
-  sessionBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: Colors.subtle,
-    padding: 12,
-    borderRadius: 16,
-    marginBottom: 14,
-  },
-  snapThumb: {
-    width: 62,
-    height: 62,
-    borderRadius: 13,
-    backgroundColor: Colors.surface,
-  },
-  snapFallback: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  badgeLine: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 3,
-  },
-  moodPill: {
-    paddingHorizontal: 9,
-    paddingVertical: 3,
-    borderRadius: 999,
-  },
-  moodPillText: {
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  confText: {
-    fontSize: 11.5,
-    fontWeight: '600',
-    color: Colors.inkSecondary,
-  },
-  playlistHeading: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: Colors.inkPrimary,
-  },
-  sessionMetaText: {
-    fontSize: 11.5,
-    color: Colors.inkMuted,
-    marginTop: 1,
-  },
-  filterToolbar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-    gap: 8,
-  },
-  langTabs: {
-    flexDirection: 'row',
-    backgroundColor: Colors.subtle,
-    padding: 3,
-    borderRadius: 10,
-  },
-  langTab: {
-    paddingHorizontal: 11,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  langTabActive: {
-    backgroundColor: Colors.surface,
-  },
-  langTabText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: Colors.inkSecondary,
-  },
-  langTabTextActive: {
-    color: Colors.inkPrimary,
-    fontWeight: '700',
-  },
-  refreshOnlineBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 11,
-    paddingVertical: 7,
-    borderRadius: 10,
-    backgroundColor: Colors.brandSoft,
-  },
-  refreshOnlineText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: Colors.brand,
-  },
-  recentSection: {
-    marginTop: 22,
-  },
-  recentHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 11,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: Colors.inkPrimary,
-  },
-  seeAllText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: Colors.brand,
-  },
-  emptyRecentText: {
-    fontSize: 13,
-    color: Colors.inkMuted,
-  },
-  recentMiniCard: {
-    width: 215,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: Colors.surface,
-    padding: 10,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: Colors.hairline,
-  },
-  recentMiniCardActive: {
-    borderColor: Colors.brand,
-    backgroundColor: Colors.elevated,
-  },
-  recentMiniThumb: {
-    width: 48,
-    height: 48,
-    borderRadius: 11,
-    backgroundColor: Colors.subtle,
-  },
-  recentMoodLabel: {
-    fontSize: 12.5,
-    fontWeight: '800',
-  },
-  recentDateText: {
-    fontSize: 11,
-    color: Colors.inkSecondary,
-    marginTop: 2,
-  },
-  recentTrackCount: {
-    fontSize: 10.5,
-    color: Colors.inkMuted,
-    marginTop: 1,
-  },
-});
+const createStyles = (colors: ThemePalette) =>
+  StyleSheet.create({
+    scroll: {
+      flex: 1,
+    },
+    scrollContent: {
+      paddingHorizontal: 16,
+      paddingTop: 12,
+      paddingBottom: 150,
+    },
+    mirroredImage: {
+      transform: [{ scaleX: -1 }],
+    },
+    greetingBlock: {
+      marginBottom: 14,
+    },
+    pageTitle: {
+      fontSize: 22,
+      fontWeight: '800',
+      letterSpacing: -0.6,
+      color: colors.inkPrimary,
+    },
+    pageSub: {
+      marginTop: 4,
+      fontSize: 13.5,
+      color: colors.inkSecondary,
+      lineHeight: 19,
+    },
+    cameraCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 24,
+      padding: 11,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+      shadowColor: colors.shadowColor,
+      shadowOffset: { width: 0, height: 10 },
+      shadowOpacity: colors.isDark ? 0.45 : 0.08,
+      shadowRadius: 22,
+      elevation: 5,
+    },
+    viewport: {
+      width: '100%',
+      aspectRatio: 3 / 4,
+      borderRadius: 18,
+      overflow: 'hidden',
+      backgroundColor: colors.cameraBg,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    permissionBox: {
+      paddingHorizontal: 26,
+      alignItems: 'center',
+    },
+    permIconWrap: {
+      width: 60,
+      height: 60,
+      borderRadius: 18,
+      backgroundColor: 'rgba(255,255,255,0.12)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: 14,
+    },
+    permTitle: {
+      fontSize: 17,
+      fontWeight: '700',
+      color: '#FFFFFF',
+      textAlign: 'center',
+    },
+    permDesc: {
+      marginTop: 6,
+      fontSize: 13,
+      color: 'rgba(255,255,255,0.72)',
+      textAlign: 'center',
+      lineHeight: 18,
+      marginBottom: 18,
+    },
+    permBtnRow: {
+      flexDirection: 'row',
+      gap: 10,
+    },
+    startCamBtn: {
+      backgroundColor: colors.brand,
+      paddingHorizontal: 18,
+      paddingVertical: 11,
+      borderRadius: 12,
+    },
+    startCamBtnText: {
+      color: '#FFFFFF',
+      fontWeight: '700',
+      fontSize: 13.5,
+    },
+    secondaryCamBtn: {
+      backgroundColor: 'rgba(255,255,255,0.16)',
+      paddingHorizontal: 16,
+      paddingVertical: 11,
+      borderRadius: 12,
+    },
+    secondaryCamBtnText: {
+      color: '#FFFFFF',
+      fontWeight: '600',
+      fontSize: 13.5,
+    },
+    topLeftPill: {
+      position: 'absolute',
+      top: 14,
+      left: 14,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: 'rgba(0, 0, 0, 0.65)',
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.14)',
+    },
+    recDot: {
+      width: 7,
+      height: 7,
+      borderRadius: 4,
+      backgroundColor: '#FF4D4D',
+    },
+    recText: {
+      color: '#FFFFFF',
+      fontSize: 10.5,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+    },
+    liveMoodHud: {
+      position: 'absolute',
+      top: 14,
+      right: 14,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 9,
+      backgroundColor: colors.hudGlass,
+      paddingHorizontal: 13,
+      paddingVertical: 8,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.18)',
+    },
+    liveMoodDot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      backgroundColor: 'rgba(255,255,255,0.45)',
+    },
+    liveHudEyebrow: {
+      fontSize: 9,
+      fontWeight: '800',
+      letterSpacing: 0.7,
+      color: 'rgba(255,255,255,0.65)',
+    },
+    liveHudValue: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: '#FFFFFF',
+    },
+    reticle: {
+      position: 'absolute',
+    },
+    corner: {
+      position: 'absolute',
+      width: 18,
+      height: 18,
+      borderColor: 'rgba(255,255,255,0.88)',
+    },
+    cTL: { top: 0, left: 0, borderTopWidth: 2.5, borderLeftWidth: 2.5, borderTopLeftRadius: 8 },
+    cTR: { top: 0, right: 0, borderTopWidth: 2.5, borderRightWidth: 2.5, borderTopRightRadius: 8 },
+    cBL: { bottom: 0, left: 0, borderBottomWidth: 2.5, borderLeftWidth: 2.5, borderBottomLeftRadius: 8 },
+    cBR: { bottom: 0, right: 0, borderBottomWidth: 2.5, borderRightWidth: 2.5, borderBottomRightRadius: 8 },
+    flashOverlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: '#FFFFFF',
+    },
+    cameraBottomBar: {
+      position: 'absolute',
+      bottom: 16,
+      left: 22,
+      right: 22,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    auxCircleBtn: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: 'rgba(0, 0, 0, 0.62)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.22)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    shutterOuter: {
+      width: 74,
+      height: 74,
+      borderRadius: 37,
+      borderWidth: 4,
+      borderColor: '#FFFFFF',
+      padding: 5,
+      backgroundColor: 'rgba(255,255,255,0.18)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    shutterInner: {
+      width: '100%',
+      height: '100%',
+      borderRadius: 30,
+      backgroundColor: '#FFFFFF',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    shutterInnerBusy: {
+      backgroundColor: colors.brand,
+    },
+    cameraFooter: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 6,
+      paddingTop: 10,
+      paddingBottom: 2,
+      gap: 10,
+    },
+    footerHint: {
+      flex: 1,
+      fontSize: 12,
+      color: colors.inkMuted,
+    },
+    toggleCamLink: {
+      fontSize: 12.5,
+      fontWeight: '700',
+      color: colors.brand,
+    },
+    playlistCard: {
+      marginTop: 18,
+      backgroundColor: colors.surface,
+      borderRadius: 24,
+      padding: 16,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+      shadowColor: colors.shadowColor,
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: colors.isDark ? 0.45 : 0.06,
+      shadowRadius: 20,
+      elevation: 4,
+    },
+    sessionBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      backgroundColor: colors.subtle,
+      padding: 12,
+      borderRadius: 16,
+      marginBottom: 14,
+    },
+    snapThumb: {
+      width: 62,
+      height: 62,
+      borderRadius: 13,
+      backgroundColor: colors.surface,
+    },
+    snapFallback: {
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    badgeLine: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 3,
+    },
+    moodPill: {
+      paddingHorizontal: 9,
+      paddingVertical: 3,
+      borderRadius: 999,
+    },
+    moodPillText: {
+      fontSize: 11,
+      fontWeight: '800',
+    },
+    confText: {
+      fontSize: 11.5,
+      fontWeight: '600',
+      color: colors.inkSecondary,
+    },
+    playlistHeading: {
+      fontSize: 16,
+      fontWeight: '800',
+      color: colors.inkPrimary,
+    },
+    sessionMetaText: {
+      fontSize: 11.5,
+      color: colors.inkMuted,
+      marginTop: 1,
+    },
+    filterToolbar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 12,
+      gap: 8,
+    },
+    langTabs: {
+      flexDirection: 'row',
+      backgroundColor: colors.subtle,
+      padding: 3,
+      borderRadius: 10,
+    },
+    langTab: {
+      paddingHorizontal: 11,
+      paddingVertical: 6,
+      borderRadius: 8,
+    },
+    langTabActive: {
+      backgroundColor: colors.surface,
+    },
+    langTabText: {
+      fontSize: 12,
+      fontWeight: '600',
+      color: colors.inkSecondary,
+    },
+    langTabTextActive: {
+      color: colors.inkPrimary,
+      fontWeight: '700',
+    },
+    refreshOnlineBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingHorizontal: 11,
+      paddingVertical: 7,
+      borderRadius: 10,
+      backgroundColor: colors.brandSoft,
+    },
+    refreshOnlineText: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: colors.brand,
+    },
+    recentSection: {
+      marginTop: 22,
+    },
+    recentHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 11,
+    },
+    sectionTitle: {
+      fontSize: 18,
+      fontWeight: '800',
+      color: colors.inkPrimary,
+    },
+    seeAllText: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.brand,
+    },
+    emptyRecentText: {
+      fontSize: 13,
+      color: colors.inkMuted,
+    },
+    recentMiniCard: {
+      width: 215,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      backgroundColor: colors.surface,
+      padding: 10,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+    },
+    recentMiniCardActive: {
+      borderColor: colors.brand,
+      backgroundColor: colors.elevated,
+    },
+    recentMiniThumb: {
+      width: 48,
+      height: 48,
+      borderRadius: 11,
+      backgroundColor: colors.subtle,
+    },
+    recentMoodLabel: {
+      fontSize: 12.5,
+      fontWeight: '800',
+    },
+    recentDateText: {
+      fontSize: 11,
+      color: colors.inkSecondary,
+      marginTop: 2,
+    },
+    recentTrackCount: {
+      fontSize: 10.5,
+      color: colors.inkMuted,
+      marginTop: 1,
+    },
+  });

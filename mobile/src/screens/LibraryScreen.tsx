@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -11,9 +11,13 @@ import {
   View,
 } from 'react-native';
 import { TrackRow } from '../components/TrackRow';
-import { queryCatalogTracks, TrackRecord } from '../database/iosDatabase';
-import { fetchAndStoreOnlineSongs } from '../services/onlineMusicService';
-import { Colors, MoodType } from '../theme/colors';
+import {
+  fetchAndStoreOnlineSongs,
+  queryCatalogTracks,
+  TrackRecord,
+} from '../database/iosDatabase';
+import { MoodType, ThemePalette } from '../theme/colors';
+import { useTheme } from '../theme/ThemeContext';
 
 interface Props {
   userId: number;
@@ -34,6 +38,9 @@ export const LibraryScreen: React.FC<Props> = ({
   onToggleFavorite,
   onCatalogExpanded,
 }) => {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const [tracks, setTracks] = useState<TrackRecord[]>([]);
   const [moodFilter, setMoodFilter] = useState<MoodType | ''>('');
   const [langFilter, setLangFilter] = useState<'tr' | 'global' | ''>('');
@@ -53,7 +60,7 @@ export const LibraryScreen: React.FC<Props> = ({
       });
       setTracks(rows);
     } catch {
-      // Ignore transient connection error
+      // Ignore transient error
     }
   }, [favOnly, langFilter, moodFilter, search, userId]);
 
@@ -100,7 +107,7 @@ export const LibraryScreen: React.FC<Props> = ({
             <Pressable
               onPress={handlePullOnline}
               disabled={fetchingOnline}
-              style={styles.onlineFetchBtn}
+              style={({ pressed }) => [styles.onlineFetchBtn, pressed && { transform: [{ scale: 0.96 }] }]}
             >
               {fetchingOnline ? (
                 <ActivityIndicator size="small" color="#FFFFFF" />
@@ -114,19 +121,19 @@ export const LibraryScreen: React.FC<Props> = ({
           </View>
 
           <View style={styles.searchWrap}>
-            <Ionicons name="search" size={18} color={Colors.inkMuted} />
+            <Ionicons name="search" size={18} color={colors.inkMuted} />
             <TextInput
               value={search}
               onChangeText={setSearch}
               placeholder="Sanatçı, şarkı veya tür ara…"
-              placeholderTextColor={Colors.inkMuted}
+              placeholderTextColor={colors.inkMuted}
               style={styles.searchInput}
               returnKeyType="search"
               onSubmitEditing={handlePullOnline}
             />
             {search.length > 0 && (
               <Pressable onPress={() => setSearch('')} hitSlop={8}>
-                <Ionicons name="close-circle" size={18} color={Colors.inkMuted} />
+                <Ionicons name="close-circle" size={18} color={colors.inkMuted} />
               </Pressable>
             )}
           </View>
@@ -186,6 +193,7 @@ export const LibraryScreen: React.FC<Props> = ({
       renderItem={({ item, index }) => (
         <TrackRow
           track={item}
+          index={index}
           isActiveTrack={playingTrackId === item.id}
           isPlaying={playingTrackId === item.id && isAudioPlaying}
           onPlayPress={() => onPlayTrack(tracks, index)}
@@ -199,102 +207,103 @@ export const LibraryScreen: React.FC<Props> = ({
   );
 };
 
-const styles = StyleSheet.create({
-  content: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 150,
-  },
-  header: {
-    marginBottom: 12,
-  },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-    marginBottom: 14,
-  },
-  title: {
-    fontSize: 23,
-    fontWeight: '800',
-    letterSpacing: -0.6,
-    color: Colors.inkPrimary,
-  },
-  subtitle: {
-    marginTop: 3,
-    fontSize: 12.5,
-    color: Colors.inkSecondary,
-  },
-  onlineFetchBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: Colors.brand,
-    paddingHorizontal: 13,
-    paddingVertical: 10,
-    borderRadius: 12,
-  },
-  onlineFetchText: {
-    color: '#FFFFFF',
-    fontSize: 12.5,
-    fontWeight: '700',
-  },
-  searchWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: Colors.surface,
-    borderRadius: 13,
-    borderWidth: 1,
-    borderColor: Colors.hairlineStrong,
-    paddingHorizontal: 12,
-    height: 46,
-    gap: 8,
-    marginBottom: 10,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 14.5,
-    color: Colors.inkPrimary,
-  },
-  filterGroup: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 7,
-    marginBottom: 8,
-  },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6.5,
-    borderRadius: 999,
-    backgroundColor: Colors.surface,
-    borderWidth: 1,
-    borderColor: Colors.hairlineStrong,
-  },
-  chipActive: {
-    backgroundColor: Colors.brandSoft,
-    borderColor: Colors.brand,
-  },
-  chipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: Colors.inkSecondary,
-  },
-  chipTextActive: {
-    color: Colors.brand,
-    fontWeight: '800',
-  },
-  emptyBox: {
-    backgroundColor: Colors.surface,
-    borderRadius: 16,
-    padding: 22,
-    borderWidth: 1,
-    borderColor: Colors.hairline,
-  },
-  emptyText: {
-    fontSize: 13,
-    color: Colors.inkSecondary,
-    textAlign: 'center',
-    lineHeight: 19,
-  },
-});
+const createStyles = (colors: ThemePalette) =>
+  StyleSheet.create({
+    content: {
+      paddingHorizontal: 16,
+      paddingTop: 12,
+      paddingBottom: 150,
+    },
+    header: {
+      marginBottom: 12,
+    },
+    titleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginBottom: 14,
+    },
+    title: {
+      fontSize: 23,
+      fontWeight: '800',
+      letterSpacing: -0.6,
+      color: colors.inkPrimary,
+    },
+    subtitle: {
+      marginTop: 3,
+      fontSize: 12.5,
+      color: colors.inkSecondary,
+    },
+    onlineFetchBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: colors.brand,
+      paddingHorizontal: 13,
+      paddingVertical: 10,
+      borderRadius: 12,
+    },
+    onlineFetchText: {
+      color: '#FFFFFF',
+      fontSize: 12.5,
+      fontWeight: '700',
+    },
+    searchWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderRadius: 13,
+      borderWidth: 1,
+      borderColor: colors.hairlineStrong,
+      paddingHorizontal: 12,
+      height: 46,
+      gap: 8,
+      marginBottom: 10,
+    },
+    searchInput: {
+      flex: 1,
+      fontSize: 14.5,
+      color: colors.inkPrimary,
+    },
+    filterGroup: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 7,
+      marginBottom: 8,
+    },
+    chip: {
+      paddingHorizontal: 12,
+      paddingVertical: 6.5,
+      borderRadius: 999,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.hairlineStrong,
+    },
+    chipActive: {
+      backgroundColor: colors.brandSoft,
+      borderColor: colors.brand,
+    },
+    chipText: {
+      fontSize: 12,
+      fontWeight: '600',
+      color: colors.inkSecondary,
+    },
+    chipTextActive: {
+      color: colors.brand,
+      fontWeight: '800',
+    },
+    emptyBox: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 22,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+    },
+    emptyText: {
+      fontSize: 13,
+      color: colors.inkSecondary,
+      textAlign: 'center',
+      lineHeight: 19,
+    },
+  });

@@ -5,11 +5,11 @@
     "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#FAF8F4"
+      "backgroundColor": "#000000"
     },
     "ios": {
       "supportsTablet": true,
@@ -17,9 +17,11 @@
       "infoPlist": {
         "NSCameraUsageDescription": "MoodSync, yüz ifadenizi canlı analiz edip o anki modunuza uygun şarkıları önermek için kameranızı kullanır.",
         "NSPhotoLibraryUsageDescription": "MoodSync, seçtiğiniz fotoğraftaki yüz ifadesine uygun şarkı listesi oluşturmak için fotoğraf arşivinize erişir.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIFileSharingEnabled": false,
+        "LSSupportsOpeningDocumentsInPlace": false,
         "NSAppTransportSecurity": {
-          "NSAllowsLocalNetworking": true,
-          "NSAllowsArbitraryLoads": true
+          "NSAllowsLocalNetworking": true
         }
       }
     },

@@ -1,12 +1,15 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, Easing, Image, StyleSheet, Text, View } from 'react-native';
-import { Colors } from '../theme/colors';
+import { ThemePalette } from '../theme/colors';
+import { useTheme } from '../theme/ThemeContext';
 
 interface Props {
   onFinish: () => void;
 }
 
 export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const logoScale = useRef(new Animated.Value(0.68)).current;
   const logoOpacity = useRef(new Animated.Value(0)).current;
   const textTranslate = useRef(new Animated.Value(16)).current;
@@ -122,7 +125,7 @@ export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
             style={[
               styles.rippleRing,
               {
-                borderColor: Colors.brand,
+                borderColor: colors.brand,
                 opacity: ring1.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] }),
                 transform: [{ scale: ring1.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1.55] }) }],
               },
@@ -132,7 +135,7 @@ export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
             style={[
               styles.rippleRing,
               {
-                borderColor: Colors.moodNeutral,
+                borderColor: colors.moodNeutral,
                 opacity: ring2.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0] }),
                 transform: [{ scale: ring2.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1.55] }) }],
               },
@@ -160,7 +163,7 @@ export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
                 styles.eqBar,
                 {
                   backgroundColor:
-                    idx === 1 ? Colors.moodPositive : idx === 3 ? Colors.moodNeutral : Colors.brand,
+                    idx === 1 ? colors.moodPositive : idx === 3 ? colors.moodNeutral : colors.brand,
                   transform: [{ scaleY: anim }],
                 },
               ]}
@@ -183,76 +186,79 @@ export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
   );
 };
 
-const styles = StyleSheet.create({
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 999,
-    backgroundColor: Colors.canvas,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  centerStage: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoAnchor: {
-    width: 144,
-    height: 144,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  rippleRing: {
-    position: 'absolute',
-    width: 132,
-    height: 132,
-    borderRadius: 36,
-    borderWidth: 2,
-  },
-  logoFrame: {
-    width: 122,
-    height: 122,
-    borderRadius: 30,
-    backgroundColor: Colors.surface,
-    padding: 6,
-    shadowColor: '#181D25',
-    shadowOffset: { width: 0, height: 14 },
-    shadowOpacity: 0.14,
-    shadowRadius: 26,
-    elevation: 10,
-  },
-  logoImage: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 24,
-  },
-  eqRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    height: 24,
-    marginTop: 20,
-    marginBottom: 12,
-  },
-  eqBar: {
-    width: 4.5,
-    height: 22,
-    borderRadius: 3,
-  },
-  brandTitle: {
-    fontSize: 30,
-    fontWeight: '800',
-    letterSpacing: -0.9,
-    color: Colors.inkPrimary,
-  },
-  brandTagline: {
-    marginTop: 5,
-    fontSize: 13.5,
-    fontWeight: '500',
-    color: Colors.inkSecondary,
-    letterSpacing: 0.2,
-  },
-});
+const createStyles = (colors: ThemePalette) =>
+  StyleSheet.create({
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      zIndex: 999,
+      backgroundColor: colors.canvas,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    centerStage: {
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    logoAnchor: {
+      width: 144,
+      height: 144,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    rippleRing: {
+      position: 'absolute',
+      width: 132,
+      height: 132,
+      borderRadius: 36,
+      borderWidth: 2,
+    },
+    logoFrame: {
+      width: 122,
+      height: 122,
+      borderRadius: 30,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+      padding: 6,
+      shadowColor: colors.brand,
+      shadowOffset: { width: 0, height: 10 },
+      shadowOpacity: colors.isDark ? 0.25 : 0.14,
+      shadowRadius: 26,
+      elevation: 10,
+    },
+    logoImage: {
+      width: '100%',
+      height: '100%',
+      borderRadius: 24,
+    },
+    eqRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      height: 24,
+      marginTop: 20,
+      marginBottom: 12,
+    },
+    eqBar: {
+      width: 4.5,
+      height: 22,
+      borderRadius: 3,
+    },
+    brandTitle: {
+      fontSize: 30,
+      fontWeight: '800',
+      letterSpacing: -0.9,
+      color: colors.inkPrimary,
+    },
+    brandTagline: {
+      marginTop: 5,
+      fontSize: 13.5,
+      fontWeight: '500',
+      color: colors.inkSecondary,
+      letterSpacing: 0.2,
+    },
+  });

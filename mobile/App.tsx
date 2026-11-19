@@ -2,15 +2,17 @@ import { Ionicons } from '@expo/vector-icons';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import { StatusBar } from 'expo-status-bar';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Animated,
+  Easing,
   Image,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -21,6 +23,7 @@ import {
   deleteScanSession,
   getDashboardStats,
   getDatabase,
+  getSandboxStorageSummary,
   getScanSessionWithTracks,
   listScanSessions,
   logoutActiveUser,
@@ -29,18 +32,23 @@ import {
   toggleFavoriteTrack,
   TrackRecord,
   UserRecord,
+  wipeAllLocalData,
 } from './src/database/iosDatabase';
 import { CameraStudioScreen } from './src/screens/CameraStudioScreen';
 import { HistoryScreen } from './src/screens/HistoryScreen';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { LoginScreen } from './src/screens/LoginScreen';
-import { resolveAiServerUrl, saveCustomAiServerUrl } from './src/services/moodAiService';
+import { getAiEngineSummary } from './src/services/moodAiService';
 import { resolvePlayablePreviewUrl } from './src/services/onlineMusicService';
-import { Colors } from './src/theme/colors';
+import { ThemePalette } from './src/theme/colors';
+import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 
 type TabKey = 'studio' | 'history' | 'library';
 
 function MainAppContent() {
+  const { colors, isDark, themeId, themes, setThemeId, cycleTheme } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const [showSplash, setShowSplash] = useState(true);
   const [dbReady, setDbReady] = useState(false);
   const [user, setUser] = useState<UserRecord | null>(null);
@@ -52,8 +60,12 @@ function MainAppContent() {
     totalScans: 0,
     dominantMood: null,
     favoriteCount: 0,
-    catalogTotal: 644,
+    catalogTotal: 0,
   });
+
+  // Smooth tab transition animation
+  const tabOpacity = useRef(new Animated.Value(1)).current;
+  const tabTranslateY = useRef(new Animated.Value(0)).current;
 
   // Audio preview state (expo-audio)
   const player = useAudioPlayer(null);
@@ -62,9 +74,10 @@ function MainAppContent() {
   const [queueIdx, setQueueIdx] = useState<number>(-1);
   const currentTrack = queueIdx >= 0 && queueIdx < queue.length ? queue[queueIdx] : null;
 
-  // Optional YOLOv8 Server URL Settings Modal
+  // On-device Privacy, Theme & Storage Settings Modal
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [serverUrlInput, setServerUrlInput] = useState('');
+  const [storageInfo, setStorageInfo] = useState({ photoCount: 0, trackCount: 0, scanCount: 0 });
+  const engineInfo = getAiEngineSummary();
 
   useEffect(() => {
     setAudioModeAsync({
@@ -77,11 +90,34 @@ function MainAppContent() {
       if (restored) {
         setUser(restored);
       }
-      const detectedUrl = await resolveAiServerUrl();
-      if (detectedUrl) setServerUrlInput(detectedUrl);
       setDbReady(true);
     })();
   }, []);
+
+  const switchTab = useCallback(
+    (next: TabKey) => {
+      if (next === activeTab) return;
+      Haptics.selectionAsync().catch(() => {});
+      setActiveTab(next);
+      tabOpacity.setValue(0);
+      tabTranslateY.setValue(12);
+      Animated.parallel([
+        Animated.timing(tabOpacity, {
+          toValue: 1,
+          duration: 240,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.spring(tabTranslateY, {
+          toValue: 0,
+          damping: 20,
+          stiffness: 200,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    },
+    [activeTab, tabOpacity, tabTranslateY]
+  );
 
   const refreshUserWorkspace = useCallback(async (uid: number) => {
     try {
@@ -93,7 +129,7 @@ function MainAppContent() {
         setActiveSession((prev) => prev || latestFull);
       }
     } catch {
-      // Ignore transient network hiccup while PC server is warming up
+      // Ignore transient refresh error
     }
   }, []);
 
@@ -157,7 +193,7 @@ function MainAppContent() {
     const full = await getScanSessionWithTracks(sessionId, user.id);
     if (full) {
       setActiveSession(full);
-      setActiveTab('studio');
+      switchTab('studio');
     }
   };
 
@@ -185,8 +221,8 @@ function MainAppContent() {
       : 0;
 
   return (
-    <View style={{ flex: 1, backgroundColor: Colors.canvas }}>
-      <StatusBar style="dark" />
+    <View style={{ flex: 1, backgroundColor: colors.canvas }}>
+      <StatusBar style={isDark ? 'light' : 'dark'} />
 
       {dbReady && !user && <LoginScreen onAuthenticated={(u) => setUser(u)} />}
 
@@ -204,11 +240,35 @@ function MainAppContent() {
 
             <View style={styles.headerRight}>
               <Pressable
-                onPress={() => setSettingsOpen(true)}
-                style={styles.headerIconBtn}
+                onPress={() => {
+                  Haptics.selectionAsync().catch(() => {});
+                  cycleTheme();
+                }}
+                style={({ pressed }) => [styles.headerIconBtn, pressed && { transform: [{ scale: 0.92 }] }]}
                 hitSlop={6}
               >
-                <Ionicons name="options-outline" size={19} color={Colors.inkPrimary} />
+                <Ionicons
+                  name={isDark ? 'moon' : 'sunny'}
+                  size={18}
+                  color={colors.brand}
+                />
+              </Pressable>
+
+              <Pressable
+                onPress={async () => {
+                  Haptics.selectionAsync().catch(() => {});
+                  const summary = await getSandboxStorageSummary().catch(() => ({
+                    photoCount: 0,
+                    trackCount: 0,
+                    scanCount: 0,
+                  }));
+                  setStorageInfo(summary);
+                  setSettingsOpen(true);
+                }}
+                style={({ pressed }) => [styles.headerIconBtn, pressed && { transform: [{ scale: 0.92 }] }]}
+                hitSlop={6}
+              >
+                <Ionicons name="options-outline" size={19} color={colors.inkPrimary} />
               </Pressable>
 
               <Pressable onPress={handleLogout} style={styles.logoutPill}>
@@ -217,8 +277,14 @@ function MainAppContent() {
             </View>
           </View>
 
-          {/* Active Screen */}
-          <View style={{ flex: 1 }}>
+          {/* Active Screen with smooth fade+slide transition */}
+          <Animated.View
+            style={{
+              flex: 1,
+              opacity: tabOpacity,
+              transform: [{ translateY: tabTranslateY }],
+            }}
+          >
             {activeTab === 'studio' && (
               <CameraStudioScreen
                 userId={user.id}
@@ -233,7 +299,7 @@ function MainAppContent() {
                   refreshUserWorkspace(user.id);
                 }}
                 onSelectPastSession={handleOpenPastSession}
-                onSeeAllHistory={() => setActiveTab('history')}
+                onSeeAllHistory={() => switchTab('history')}
                 onPlayTrack={handlePlayFromQueue}
                 onToggleFavorite={handleToggleFavorite}
                 onCatalogExpanded={() => refreshUserWorkspace(user.id)}
@@ -246,7 +312,7 @@ function MainAppContent() {
                 stats={stats}
                 onOpenSession={handleOpenPastSession}
                 onDeleteSession={handleDeletePastSession}
-                onNewScan={() => setActiveTab('studio')}
+                onNewScan={() => switchTab('studio')}
               />
             )}
 
@@ -261,7 +327,7 @@ function MainAppContent() {
                 onCatalogExpanded={() => refreshUserWorkspace(user.id)}
               />
             )}
-          </View>
+          </Animated.View>
 
           {/* Floating Mini Player + iOS Bottom Tab Bar */}
           <SafeAreaView edges={['bottom']} style={styles.bottomDock}>
@@ -302,16 +368,13 @@ function MainAppContent() {
                 return (
                   <Pressable
                     key={tab.key}
-                    onPress={() => {
-                      Haptics.selectionAsync().catch(() => {});
-                      setActiveTab(tab.key);
-                    }}
-                    style={styles.tabItem}
+                    onPress={() => switchTab(tab.key)}
+                    style={({ pressed }) => [styles.tabItem, pressed && { transform: [{ scale: 0.92 }] }]}
                   >
                     <Ionicons
                       name={active ? tab.activeIcon : tab.icon}
                       size={22}
-                      color={active ? Colors.brand : Colors.inkMuted}
+                      color={active ? colors.brand : colors.inkMuted}
                     />
                     <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
                       {tab.label}
@@ -322,45 +385,105 @@ function MainAppContent() {
             </View>
           </SafeAreaView>
 
-          {/* YOLOv8 AI Server Settings Modal */}
+          {/* On-Device Theme, Privacy & Storage Modal */}
           <Modal visible={settingsOpen} transparent animationType="fade">
             <View style={styles.modalBackdrop}>
               <View style={styles.modalCard}>
-                <Text style={styles.modalTitle}>YOLOv8 AI Sunucu Bağlantısı</Text>
-                <Text style={styles.modalDesc}>
-                  Expo Go aynı Wi-Fi ağındaki bilgisayarınızda çalışan Python YOLOv8 sunucusunu otomatik bulur. Gerekirse özel adres girebilirsiniz:
-                </Text>
-                <TextInput
-                  value={serverUrlInput}
-                  onChangeText={setServerUrlInput}
-                  placeholder="http://192.168.1.x:8000"
-                  placeholderTextColor={Colors.inkMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  style={styles.modalInput}
-                />
-                <View style={styles.modalBtns}>
-                  <Pressable
-                    onPress={async () => {
-                      await saveCustomAiServerUrl(null);
-                      const autoUrl = await resolveAiServerUrl();
-                      setServerUrlInput(autoUrl || '');
-                      setSettingsOpen(false);
-                    }}
-                    style={styles.modalResetBtn}
-                  >
-                    <Text style={styles.modalResetText}>Otomatik Bul</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={async () => {
-                      await saveCustomAiServerUrl(serverUrlInput);
-                      setSettingsOpen(false);
-                    }}
-                    style={styles.modalSaveBtn}
-                  >
-                    <Text style={styles.modalSaveText}>Kaydet</Text>
-                  </Pressable>
-                </View>
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  <Text style={styles.modalTitle}>Görünüm &amp; Gizlilik</Text>
+                  <Text style={styles.modalDesc}>
+                    iPhone 16 Pro OLED ekranına özel simsiyah ve koyu temalardan birini seçebilirsin.
+                  </Text>
+
+                  <Text style={styles.sectionMiniTitle}>TEMA SEÇİMİ</Text>
+                  <View style={styles.themeGrid}>
+                    {themes.map((t) => {
+                      const selected = themeId === t.id;
+                      return (
+                        <Pressable
+                          key={t.id}
+                          onPress={() => {
+                            Haptics.selectionAsync().catch(() => {});
+                            setThemeId(t.id);
+                          }}
+                          style={[
+                            styles.themeCard,
+                            selected && styles.themeCardSelected,
+                          ]}
+                        >
+                          <View style={styles.themeTopRow}>
+                            <View
+                              style={[
+                                styles.swatchCircle,
+                                { backgroundColor: t.swatchBg, borderColor: t.swatchAccent },
+                              ]}
+                            >
+                              <View
+                                style={[styles.swatchInnerDot, { backgroundColor: t.swatchAccent }]}
+                              />
+                            </View>
+                            {selected && (
+                              <Ionicons name="checkmark-circle" size={18} color={colors.brand} />
+                            )}
+                          </View>
+                          <Text style={styles.themeName}>{t.nameTr}</Text>
+                          <Text numberOfLines={2} style={styles.themeDesc}>
+                            {t.descTr}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  <View style={styles.infoBox}>
+                    <Text style={styles.infoLabel}>Aktif AI Motoru</Text>
+                    <Text style={styles.infoValue}>{engineInfo.label}</Text>
+                    <Text style={[styles.infoLabel, { marginTop: 10 }]}>
+                      Uygulama İçi Veriler (Silinince Tamamen Temizlenir)
+                    </Text>
+                    <Text style={styles.infoValue}>
+                      {storageInfo.photoCount} fotoğraf · {storageInfo.scanCount} tarama · {storageInfo.trackCount} şarkı
+                    </Text>
+                  </View>
+
+                  <View style={styles.modalBtns}>
+                    <Pressable
+                      onPress={() => {
+                        Alert.alert(
+                          'Tüm Verileri Sil',
+                          'Çekilen tüm fotoğraflar, tarama geçmişi, hesaplar ve yerel müzik veritabanı telefondan kalıcı olarak silinecek. Devam edilsin mi?',
+                          [
+                            { text: 'Vazgeç', style: 'cancel' },
+                            {
+                              text: 'Hepsini Sil',
+                              style: 'destructive',
+                              onPress: async () => {
+                                player.pause();
+                                setQueue([]);
+                                setQueueIdx(-1);
+                                setActiveSession(null);
+                                setSessions([]);
+                                await wipeAllLocalData();
+                                setUser(null);
+                                setSettingsOpen(false);
+                                Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+                              },
+                            },
+                          ]
+                        );
+                      }}
+                      style={styles.modalDangerBtn}
+                    >
+                      <Text style={styles.modalDangerText}>Tüm Verileri Sıfırla</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => setSettingsOpen(false)}
+                      style={styles.modalSaveBtn}
+                    >
+                      <Text style={styles.modalSaveText}>Kapat</Text>
+                    </Pressable>
+                  </View>
+                </ScrollView>
               </View>
             </View>
           </Modal>
@@ -375,163 +498,235 @@ function MainAppContent() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <MainAppContent />
+      <ThemeProvider>
+        <MainAppContent />
+      </ThemeProvider>
     </SafeAreaProvider>
   );
 }
 
-const styles = StyleSheet.create({
-  appSafe: {
-    flex: 1,
-    backgroundColor: Colors.canvas,
-  },
-  topHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.hairline,
-    backgroundColor: Colors.canvas,
-  },
-  brandRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  headerLogo: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-  },
-  headerBrand: {
-    fontSize: 17,
-    fontWeight: '800',
-    letterSpacing: -0.4,
-    color: Colors.inkPrimary,
-  },
-  headerSub: {
-    fontSize: 11,
-    color: Colors.inkMuted,
-    fontWeight: '600',
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  headerIconBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    backgroundColor: Colors.surface,
-    borderWidth: 1,
-    borderColor: Colors.hairline,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoutPill: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 10,
-    backgroundColor: Colors.subtle,
-  },
-  logoutText: {
-    fontSize: 12.5,
-    fontWeight: '700',
-    color: Colors.inkSecondary,
-  },
-  bottomDock: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255, 255, 255, 0.94)',
-    borderTopWidth: 1,
-    borderTopColor: Colors.hairline,
-  },
-  tabBar: {
-    flexDirection: 'row',
-    paddingTop: 7,
-    paddingBottom: 4,
-  },
-  tabItem: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 3,
-  },
-  tabLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: Colors.inkMuted,
-  },
-  tabLabelActive: {
-    color: Colors.brand,
-    fontWeight: '800',
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(14, 16, 22, 0.48)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 22,
-  },
-  modalCard: {
-    width: '100%',
-    backgroundColor: Colors.surface,
-    borderRadius: 22,
-    padding: 22,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: Colors.inkPrimary,
-  },
-  modalDesc: {
-    marginTop: 6,
-    fontSize: 13,
-    color: Colors.inkSecondary,
-    lineHeight: 18,
-    marginBottom: 14,
-  },
-  modalInput: {
-    height: 46,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Colors.hairlineStrong,
-    backgroundColor: Colors.elevated,
-    paddingHorizontal: 12,
-    fontSize: 14.5,
-    color: Colors.inkPrimary,
-    marginBottom: 14,
-  },
-  modalBtns: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 10,
-  },
-  modalResetBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 11,
-    backgroundColor: Colors.subtle,
-  },
-  modalResetText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: Colors.inkSecondary,
-  },
-  modalSaveBtn: {
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 11,
-    backgroundColor: Colors.brand,
-  },
-  modalSaveText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-});
+const createStyles = (colors: ThemePalette) =>
+  StyleSheet.create({
+    appSafe: {
+      flex: 1,
+      backgroundColor: colors.canvas,
+    },
+    topHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: colors.hairline,
+      backgroundColor: colors.canvas,
+    },
+    brandRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    headerLogo: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+    },
+    headerBrand: {
+      fontSize: 17,
+      fontWeight: '800',
+      letterSpacing: -0.4,
+      color: colors.inkPrimary,
+    },
+    headerSub: {
+      fontSize: 11,
+      color: colors.inkMuted,
+      fontWeight: '600',
+    },
+    headerRight: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    headerIconBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    logoutPill: {
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      borderRadius: 10,
+      backgroundColor: colors.subtle,
+    },
+    logoutText: {
+      fontSize: 12.5,
+      fontWeight: '700',
+      color: colors.inkSecondary,
+    },
+    bottomDock: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: colors.dockBg,
+      borderTopWidth: 1,
+      borderTopColor: colors.hairline,
+    },
+    tabBar: {
+      flexDirection: 'row',
+      paddingTop: 7,
+      paddingBottom: 4,
+    },
+    tabItem: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 3,
+    },
+    tabLabel: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: colors.inkMuted,
+    },
+    tabLabelActive: {
+      color: colors.brand,
+      fontWeight: '800',
+    },
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0, 0, 0, 0.72)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 18,
+    },
+    modalCard: {
+      width: '100%',
+      maxHeight: '86%',
+      backgroundColor: colors.surface,
+      borderRadius: 24,
+      padding: 20,
+      borderWidth: 1,
+      borderColor: colors.hairlineStrong,
+    },
+    modalTitle: {
+      fontSize: 19,
+      fontWeight: '800',
+      color: colors.inkPrimary,
+    },
+    modalDesc: {
+      marginTop: 5,
+      fontSize: 13,
+      color: colors.inkSecondary,
+      lineHeight: 18,
+      marginBottom: 14,
+    },
+    sectionMiniTitle: {
+      fontSize: 10.5,
+      fontWeight: '800',
+      letterSpacing: 0.7,
+      color: colors.inkMuted,
+      marginBottom: 8,
+    },
+    themeGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 9,
+      marginBottom: 14,
+    },
+    themeCard: {
+      width: '48%',
+      borderRadius: 15,
+      padding: 12,
+      backgroundColor: colors.elevated,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+    },
+    themeCardSelected: {
+      borderColor: colors.brand,
+      backgroundColor: colors.brandSoft,
+    },
+    themeTopRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 8,
+    },
+    swatchCircle: {
+      width: 26,
+      height: 26,
+      borderRadius: 13,
+      borderWidth: 2,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    swatchInnerDot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+    },
+    themeName: {
+      fontSize: 13,
+      fontWeight: '800',
+      color: colors.inkPrimary,
+    },
+    themeDesc: {
+      marginTop: 2,
+      fontSize: 11,
+      color: colors.inkSecondary,
+      lineHeight: 14.5,
+    },
+    infoBox: {
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+      backgroundColor: colors.elevated,
+      padding: 14,
+      marginBottom: 16,
+    },
+    infoLabel: {
+      fontSize: 10.5,
+      fontWeight: '700',
+      color: colors.inkMuted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.4,
+    },
+    infoValue: {
+      marginTop: 3,
+      fontSize: 13.5,
+      fontWeight: '700',
+      color: colors.inkPrimary,
+    },
+    modalBtns: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: 10,
+    },
+    modalDangerBtn: {
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 11,
+      backgroundColor: colors.dangerSoft,
+    },
+    modalDangerText: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.danger,
+    },
+    modalSaveBtn: {
+      paddingHorizontal: 18,
+      paddingVertical: 10,
+      borderRadius: 11,
+      backgroundColor: colors.brand,
+    },
+    modalSaveText: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: '#FFFFFF',
+    },
+  });
