@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "MoodSync",
+    "slug": "moodsync",
+    "version": "2.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FAF8F4"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.justlacia.moodsync",
+      "infoPlist": {
+        "NSCameraUsageDescription": "MoodSync, yüz ifadenizi canlı analiz edip o anki modunuza uygun şarkıları önermek için kameranızı kullanır.",
+        "NSPhotoLibraryUsageDescription": "MoodSync, seçtiğiniz fotoğraftaki yüz ifadesine uygun şarkı listesi oluşturmak için fotoğraf arşivinize erişir.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true,
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FAF8F4",
+        "foregroundImage": "./assets/icon.png"
+      },
+      "permissions": [
+        "CAMERA"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "MoodSync, yüz ifadenizi canlı yakalayıp modunuza uygun müzikler önermek için kameranızı kullanır."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "MoodSync, seçtiğiniz fotoğraftan mod analizi yapmak için galerinize erişir."
+        }
+      ],
+      "expo-sqlite",
+      "expo-audio"
+    ]
+  }
+}

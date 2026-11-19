@@ -1,0 +1,36 @@
+# Build Artifacts & IDE
+.vs/*
+bin/*
+obj/*
+MoodSyncProject.csproj
+MoodSyncProject.csproj.user
+runs/*
+**/bin/
+**/obj/
+**/.vs/
+**/.venv/
+**/__pycache__/
+**/appsettings.local.json
+*.user
+*.suo
+*.log
+
+# Local Runtime Databases & Certificates
+webapp/data/certs/
+webapp/data/*.db
+webapp/data/*.db-wal
+webapp/data/*.db-shm
+*.db-wal
+*.db-shm
+
+# Mobile Build & Dependencies
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/ios/
+
+# Sample Media & Inference Outputs
+detected_images/
+images/*.jpg
+images/*.jpeg
+images/*.png
