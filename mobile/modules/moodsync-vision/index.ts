@@ -1,4 +1,79 @@
-import { requireOptionalNativeModule } from 'expo-modules-core';
+import { requireNativeViewManager, requireOptionalNativeModule } from 'expo-modules-core';
+import type * as React from 'react';
+import { Platform, StyleProp, ViewStyle } from 'react-native';
+
+export interface MoodSyncGlassViewProps {
+  glassStyle?: 'regular' | 'clear';
+  isDark?: boolean;
+  interactive?: boolean;
+  glassTintColor?: string | null;
+  capsule?: boolean;
+  cornerRadius?: number;
+  showShadow?: boolean;
+  pointerEvents?: 'none' | 'auto' | 'box-none' | 'box-only';
+  style?: StyleProp<ViewStyle>;
+}
+
+let resolvedNativeGlassView: React.ComponentType<MoodSyncGlassViewProps> | null = null;
+if (
+  Platform.OS === 'ios' &&
+  typeof (globalThis as any).expo?.getViewConfig === 'function'
+) {
+  try {
+    if ((globalThis as any).expo.getViewConfig('MoodSyncVision', 'MoodSyncGlassView')) {
+      resolvedNativeGlassView = requireNativeViewManager<MoodSyncGlassViewProps>(
+        'MoodSyncVision',
+        'MoodSyncGlassView'
+      );
+    } else if ((globalThis as any).expo.getViewConfig('MoodSyncVision')) {
+      resolvedNativeGlassView =
+        requireNativeViewManager<MoodSyncGlassViewProps>('MoodSyncVision');
+    }
+  } catch {
+    resolvedNativeGlassView = null;
+  }
+}
+
+export const NativeMoodSyncGlassView = resolvedNativeGlassView;
+
+export interface NativeTabItemConfig {
+  key: string;
+  label: string;
+  sfSymbol: string;
+  activeSfSymbol: string;
+  showBadgeDot?: boolean;
+}
+
+export interface MoodSyncLiquidTabBarProps {
+  tabs: NativeTabItemConfig[];
+  activeTab: string;
+  isDark: boolean;
+  accentColor: string;
+  onSelectTab?: (event: { nativeEvent: { key: string } }) => void;
+  style?: StyleProp<ViewStyle>;
+}
+
+let resolvedNativeLiquidTabBar: React.ComponentType<MoodSyncLiquidTabBarProps> | null = null;
+if (
+  Platform.OS === 'ios' &&
+  typeof (globalThis as any).expo?.getViewConfig === 'function' &&
+  Boolean((globalThis as any).expo.getViewConfig('MoodSyncVision', 'MoodSyncLiquidTabBarView'))
+) {
+  try {
+    resolvedNativeLiquidTabBar = requireNativeViewManager<MoodSyncLiquidTabBarProps>(
+      'MoodSyncVision',
+      'MoodSyncLiquidTabBarView'
+    );
+  } catch {
+    resolvedNativeLiquidTabBar = null;
+  }
+}
+
+export const NativeMoodSyncLiquidTabBar = resolvedNativeLiquidTabBar;
+
+export function isNativeLiquidGlassAvailable(): boolean {
+  return NativeMoodSyncGlassView !== null;
+}
 
 export interface NativeVisionResult {
   detected: boolean;

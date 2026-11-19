@@ -6,11 +6,71 @@ import { analyzeCameraFrame } from '../services/moodAiService';
 import { fetchOnlineTracksDirect, OnlineTrackPayload } from '../services/onlineMusicService';
 import { emotionToMood, EmotionType, MoodType } from '../theme/colors';
 
+export type UserRole = 'admin' | 'user';
+
 export interface UserRecord {
   id: number;
   username: string;
   displayName: string;
+  role: UserRole;
   createdAt: string;
+}
+
+export function isAdminUser(user: UserRecord | null | undefined): boolean {
+  return Boolean(user && (user.role === 'admin' || user.username.toLowerCase() === 'haluk'));
+}
+
+export interface AdminUserSummary {
+  id: number;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  createdAt: string;
+  scanCount: number;
+  favoriteCount: number;
+  lastScanAt: string | null;
+}
+
+export type AdminScanSessionRecord = ScanSessionRecord & {
+  username: string;
+  displayName: string;
+};
+
+export interface AdminFavoriteRecord {
+  userId: number;
+  username: string;
+  displayName: string;
+  trackId: number;
+  title: string;
+  artist: string;
+  mood: MoodType;
+  language: 'tr' | 'global';
+  createdAt: string;
+}
+
+export type AdminTableName =
+  | 'users'
+  | 'scan_sessions'
+  | 'tracks'
+  | 'favorites'
+  | 'scan_session_tracks';
+
+export interface AdminDatabaseOverview {
+  userCount: number;
+  adminCount: number;
+  scanCount: number;
+  trackCount: number;
+  favoriteCount: number;
+  sessionTrackLinkCount: number;
+  photoCount: number;
+  photoBytes: number;
+  dbBytes: number;
+  emotionBreakdown: Array<{ emotion: string; count: number }>;
+  moodBreakdown: Array<{ mood: MoodType; count: number }>;
+  languageBreakdown: Array<{ language: string; count: number }>;
+  sourceBreakdown: Array<{ source: string; count: number }>;
+  tables: Array<{ name: AdminTableName; rowCount: number }>;
+  prefs: Record<string, string>;
 }
 
 export interface TrackRecord {
@@ -214,6 +274,7 @@ async function initDatabaseInternal(): Promise<SQLite.SQLiteDatabase> {
       username TEXT NOT NULL UNIQUE COLLATE NOCASE,
       display_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
       created_at TEXT NOT NULL
     );
 
@@ -272,7 +333,13 @@ async function initDatabaseInternal(): Promise<SQLite.SQLiteDatabase> {
     CREATE INDEX IF NOT EXISTS idx_scans_user_created ON scan_sessions(user_id, created_at DESC);
   `);
 
-  // Remove legacy demo account and ensure default personal account (haluk / haluk) exists locally
+  // Safe migration for existing databases lacking users.role
+  const userCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(users)');
+  if (!userCols.some((c) => c.name === 'role')) {
+    await db.execAsync("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';");
+  }
+
+  // Remove legacy demo account and ensure default admin account (haluk / haluk) exists locally
   await db.runAsync('DELETE FROM users WHERE lower(username) = ?', ['demo']);
   const halukExists = await db.getFirstAsync<{ id: number }>(
     'SELECT id FROM users WHERE lower(username) = ?',
@@ -281,8 +348,12 @@ async function initDatabaseInternal(): Promise<SQLite.SQLiteDatabase> {
   if (!halukExists) {
     const halukHash = await hashPassword('haluk');
     await db.runAsync(
-      'INSERT INTO users (username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?)',
-      ['haluk', 'Haluk', halukHash, new Date().toISOString()]
+      'INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
+      ['haluk', 'Haluk', halukHash, 'admin', new Date().toISOString()]
+    );
+  } else {
+    await db.runAsync(
+      "UPDATE users SET role = 'admin' WHERE lower(username) = 'haluk' AND role != 'admin'"
     );
   }
 
@@ -400,13 +471,17 @@ function mapTrackRow(row: any): TrackRecord {
 
 // ───────────────────────── Auth (100% On-Device SQLite) ─────────────────────────
 
+function resolveRole(username: string, role?: string | null): UserRole {
+  return role === 'admin' || username.toLowerCase() === 'haluk' ? 'admin' : 'user';
+}
+
 export async function loginUser(username: string, password: string): Promise<UserRecord | null> {
   const clean = username.trim();
   if (!clean || !password) return null;
 
   const db = await getDatabase();
   const row = await db.getFirstAsync<any>(
-    'SELECT id, username, display_name, password_hash, created_at FROM users WHERE lower(username) = lower(?)',
+    'SELECT id, username, display_name, password_hash, role, created_at FROM users WHERE lower(username) = lower(?)',
     [clean]
   );
   if (!row) return null;
@@ -416,11 +491,15 @@ export async function loginUser(username: string, password: string): Promise<Use
     return null;
   }
 
+  const uname = String(row.username);
+  const role = resolveRole(uname, row.role);
+
   await setSetting('active_user_id', String(row.id));
   return {
     id: Number(row.id),
-    username: String(row.username),
-    displayName: String(row.display_name || row.username),
+    username: uname,
+    displayName: String(row.display_name || uname),
+    role,
     createdAt: String(row.created_at),
   };
 }
@@ -451,8 +530,8 @@ export async function registerUser(
   const passHash = await hashPassword(password);
   const now = new Date().toISOString();
   const res = await db.runAsync(
-    'INSERT INTO users (username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?)',
-    [cleanUser, cleanName, passHash, now]
+    'INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
+    [cleanUser, cleanName, passHash, 'user', now]
   );
 
   const newId = Number(res.lastInsertRowId);
@@ -461,6 +540,7 @@ export async function registerUser(
     id: newId,
     username: cleanUser,
     displayName: cleanName,
+    role: 'user',
     createdAt: now,
   };
 }
@@ -470,17 +550,19 @@ export async function restoreActiveUser(): Promise<UserRecord | null> {
   if (!savedId) return null;
   const db = await getDatabase();
   const row = await db.getFirstAsync<any>(
-    'SELECT id, username, display_name, created_at FROM users WHERE id = ?',
+    'SELECT id, username, display_name, role, created_at FROM users WHERE id = ?',
     [Number(savedId)]
   );
   if (!row) {
     await setSetting('active_user_id', null);
     return null;
   }
+  const uname = String(row.username);
   return {
     id: Number(row.id),
-    username: String(row.username),
-    displayName: String(row.display_name || row.username),
+    username: uname,
+    displayName: String(row.display_name || uname),
+    role: resolveRole(uname, row.role),
     createdAt: String(row.created_at),
   };
 }
@@ -837,6 +919,140 @@ export async function getScanSessionWithTracks(
   };
 }
 
+export async function expandScanSessionTracks(params: {
+  sessionId: number;
+  userId: number;
+  addCount?: number;
+  language?: 'all' | 'tr' | 'global';
+}): Promise<{ session: ScanSessionRecord; addedCount: number } | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<any>(
+    'SELECT * FROM scan_sessions WHERE id = ? AND user_id = ?',
+    [params.sessionId, params.userId]
+  );
+  if (!row) return null;
+
+  const targetAdd = Math.max(1, Math.min(30, params.addCount ?? 8));
+  const lang = params.language || 'all';
+  const mood = (row.mood as MoodType) || 'neutral';
+  const emotion = (row.emotion as EmotionType) || null;
+
+  const existingRows = await db.getAllAsync<{
+    track_id: number;
+    position: number | null;
+    norm_artist: string | null;
+    norm_title: string | null;
+  }>(
+    `SELECT sst.track_id,
+            sst.position,
+            lower(trim(t.artist)) AS norm_artist,
+            lower(trim(t.title)) AS norm_title
+     FROM scan_session_tracks sst
+     JOIN tracks t ON t.id = sst.track_id
+     WHERE sst.session_id = ?`,
+    [params.sessionId]
+  );
+
+  const existingIds = new Set<number>();
+  const existingSignatures = new Set<string>();
+  let maxPosition = -1;
+
+  for (const er of existingRows) {
+    existingIds.add(Number(er.track_id));
+    if (er.position !== null && er.position !== undefined) {
+      maxPosition = Math.max(maxPosition, Number(er.position));
+    }
+    const artist = String(er.norm_artist || '').trim();
+    const title = String(er.norm_title || '').trim();
+    if (artist || title) {
+      existingSignatures.add(`${artist}::${title}`);
+    }
+  }
+
+  const pickUniqueCandidates = async (): Promise<TrackRecord[]> => {
+    const whereParts = ['t.mood = ?'];
+    const args: any[] = [params.userId, mood];
+
+    if (lang === 'tr' || lang === 'global') {
+      whereParts.push('t.language = ?');
+      args.push(lang);
+    }
+
+    if (emotion === 'angry') {
+      whereParts.push("(t.energy_tag = 'angry-rock' OR t.mood = 'negative')");
+    }
+
+    const queryLimit = Math.max(40, targetAdd * 5);
+    const rows = await db.getAllAsync<any>(
+      `SELECT t.*, CASE WHEN f.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+       FROM tracks t
+       LEFT JOIN favorites f ON f.track_id = t.id AND f.user_id = ?
+       WHERE ${whereParts.join(' AND ')}
+       ORDER BY
+         CASE WHEN ? = 'angry' AND t.energy_tag = 'angry-rock' THEN 0 ELSE 1 END,
+         RANDOM()
+       LIMIT ?`,
+      [args[0], ...args.slice(1), emotion || '', queryLimit]
+    );
+
+    const unique: TrackRecord[] = [];
+    const seenSig = new Set<string>(existingSignatures);
+    const seenIds = new Set<number>(existingIds);
+
+    for (const raw of rows) {
+      const tr = mapTrackRow(raw);
+      const sig = `${tr.artist.toLowerCase().trim()}::${tr.title.toLowerCase().trim()}`;
+      if (seenIds.has(tr.id) || seenSig.has(sig)) continue;
+      seenIds.add(tr.id);
+      seenSig.add(sig);
+      unique.push(tr);
+      if (unique.length >= targetAdd) break;
+    }
+
+    return unique;
+  };
+
+  try {
+    const fresh = await fetchOnlineTracksDirect({ mood, emotion, language: lang });
+    if (fresh.length > 0) {
+      await upsertTracks(fresh);
+    }
+  } catch {
+    // Offline fallback: pick directly from existing local catalog
+  }
+
+  let selected = await pickUniqueCandidates();
+
+  if (selected.length < targetAdd) {
+    try {
+      const extraFresh = await fetchOnlineTracksDirect({ mood, emotion: null, language: lang });
+      if (extraFresh.length > 0) {
+        await upsertTracks(extraFresh);
+        selected = await pickUniqueCandidates();
+      }
+    } catch {
+      // Ignore offline fallback error
+    }
+  }
+
+  let nextPos = maxPosition + 1;
+  let addedCount = 0;
+  for (const tr of selected) {
+    const res = await db.runAsync(
+      'INSERT OR IGNORE INTO scan_session_tracks (session_id, track_id, position) VALUES (?, ?, ?)',
+      [params.sessionId, tr.id, nextPos]
+    );
+    if (res.changes > 0) {
+      nextPos++;
+      addedCount++;
+    }
+  }
+
+  const updated = await getScanSessionWithTracks(params.sessionId, params.userId);
+  if (!updated) return null;
+  return { session: updated, addedCount };
+}
+
 export async function deleteScanSession(sessionId: number, userId: number): Promise<void> {
   const db = await getDatabase();
   const existing = await db.getFirstAsync<{ snapshot_uri: string | null }>(
@@ -876,5 +1092,460 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats>
     dominantEmotion: (domMoodRow?.emotion as EmotionType) || null,
     favoriteCount: Number(favCountRow?.cnt || 0),
     catalogTotal: Number(catalogRow?.cnt || 0),
+  };
+}
+
+export async function clearUserScanSessions(userId: number): Promise<number> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<{ id: number; snapshot_uri: string | null }>(
+    'SELECT id, snapshot_uri FROM scan_sessions WHERE user_id = ?',
+    [userId]
+  );
+  for (const r of rows) {
+    if (r.snapshot_uri) {
+      deleteSandboxFileQuietly(r.snapshot_uri);
+    }
+  }
+  await db.runAsync('DELETE FROM scan_sessions WHERE user_id = ?', [userId]);
+  return rows.length;
+}
+
+// ───────────────────────── Admin Panel & Full SQLite Explorer ─────────────────────────
+
+const ADMIN_ALLOWED_TABLES: Record<AdminTableName, true> = {
+  users: true,
+  scan_sessions: true,
+  tracks: true,
+  favorites: true,
+  scan_session_tracks: true,
+};
+
+function maskSensitiveRow(row: Record<string, unknown>): Record<string, unknown> {
+  if (!('password_hash' in row)) return row;
+  const val = row.password_hash;
+  return {
+    ...row,
+    password_hash: typeof val === 'string' ? `sha256:${val.slice(0, 10)}…` : val,
+  };
+}
+
+export async function getAdminDatabaseOverview(): Promise<AdminDatabaseOverview> {
+  const db = await getDatabase();
+
+  const [
+    userRow,
+    adminRow,
+    scanRow,
+    trackRow,
+    favRow,
+    linkRow,
+    pageCountRow,
+    pageSizeRow,
+    emotionRows,
+    moodRows,
+    langRows,
+    sourceRows,
+  ] = await Promise.all([
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM users'),
+    db.getFirstAsync<{ cnt: number }>(
+      "SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin' OR lower(username) = 'haluk'"
+    ),
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM scan_sessions'),
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM tracks'),
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM favorites'),
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM scan_session_tracks'),
+    db.getFirstAsync<Record<string, unknown>>('PRAGMA page_count'),
+    db.getFirstAsync<Record<string, unknown>>('PRAGMA page_size'),
+    db.getAllAsync<{ emotion: string; count: number }>(
+      `SELECT COALESCE(NULLIF(emotion, ''), mood) AS emotion, COUNT(*) AS count
+       FROM scan_sessions
+       GROUP BY COALESCE(NULLIF(emotion, ''), mood)
+       ORDER BY count DESC`
+    ),
+    db.getAllAsync<{ mood: MoodType; count: number }>(
+      `SELECT mood, COUNT(*) AS count
+       FROM scan_sessions
+       GROUP BY mood
+       ORDER BY count DESC`
+    ),
+    db.getAllAsync<{ language: string; count: number }>(
+      `SELECT language, COUNT(*) AS count
+       FROM tracks
+       GROUP BY language
+       ORDER BY count DESC`
+    ),
+    db.getAllAsync<{ source: string; count: number }>(
+      `SELECT external_source AS source, COUNT(*) AS count
+       FROM tracks
+       GROUP BY external_source
+       ORDER BY count DESC`
+    ),
+  ]);
+
+  const pageCount = pageCountRow ? Number(Object.values(pageCountRow)[0] || 0) : 0;
+  const pageSize = pageSizeRow ? Number(Object.values(pageSizeRow)[0] || 0) : 0;
+  const dbBytes = Math.max(0, pageCount * pageSize);
+
+  let photoCount = 0;
+  let photoBytes = 0;
+  try {
+    const dir = new Directory(Paths.document, SNAPSHOTS_DIR_NAME);
+    if (dir.exists) {
+      const entries = dir.list();
+      for (const entry of entries) {
+        if (entry instanceof File) {
+          photoCount++;
+          photoBytes += Number(entry.size || 0);
+        }
+      }
+    }
+  } catch {
+    photoCount = 0;
+    photoBytes = 0;
+  }
+
+  const userCount = Number(userRow?.cnt || 0);
+  const adminCount = Number(adminRow?.cnt || 0);
+  const scanCount = Number(scanRow?.cnt || 0);
+  const trackCount = Number(trackRow?.cnt || 0);
+  const favoriteCount = Number(favRow?.cnt || 0);
+  const sessionTrackLinkCount = Number(linkRow?.cnt || 0);
+
+  return {
+    userCount,
+    adminCount,
+    scanCount,
+    trackCount,
+    favoriteCount,
+    sessionTrackLinkCount,
+    photoCount,
+    photoBytes,
+    dbBytes,
+    emotionBreakdown: emotionRows.map((r) => ({
+      emotion: String(r.emotion || 'neutral'),
+      count: Number(r.count || 0),
+    })),
+    moodBreakdown: moodRows.map((r) => ({
+      mood: (r.mood as MoodType) || 'neutral',
+      count: Number(r.count || 0),
+    })),
+    languageBreakdown: langRows.map((r) => ({
+      language: String(r.language || 'global'),
+      count: Number(r.count || 0),
+    })),
+    sourceBreakdown: sourceRows.map((r) => ({
+      source: String(r.source || 'itunes'),
+      count: Number(r.count || 0),
+    })),
+    tables: [
+      { name: 'users', rowCount: userCount },
+      { name: 'scan_sessions', rowCount: scanCount },
+      { name: 'tracks', rowCount: trackCount },
+      { name: 'favorites', rowCount: favoriteCount },
+      { name: 'scan_session_tracks', rowCount: sessionTrackLinkCount },
+    ],
+    prefs: { ...readPrefs() },
+  };
+}
+
+export async function adminListUsers(): Promise<AdminUserSummary[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<any>(
+    `SELECT u.id, u.username, u.display_name, u.role, u.created_at,
+            (SELECT COUNT(*) FROM scan_sessions s WHERE s.user_id = u.id) AS scan_count,
+            (SELECT COUNT(*) FROM favorites f WHERE f.user_id = u.id) AS favorite_count,
+            (SELECT MAX(s.created_at) FROM scan_sessions s WHERE s.user_id = u.id) AS last_scan_at
+     FROM users u
+     ORDER BY CASE WHEN lower(u.username) = 'haluk' OR u.role = 'admin' THEN 0 ELSE 1 END, u.created_at DESC`
+  );
+
+  return rows.map((r) => {
+    const uname = String(r.username);
+    return {
+      id: Number(r.id),
+      username: uname,
+      displayName: String(r.display_name || uname),
+      role: resolveRole(uname, r.role),
+      createdAt: String(r.created_at),
+      scanCount: Number(r.scan_count || 0),
+      favoriteCount: Number(r.favorite_count || 0),
+      lastScanAt: r.last_scan_at ? String(r.last_scan_at) : null,
+    };
+  });
+}
+
+export async function adminCreateUser(
+  displayName: string,
+  username: string,
+  password: string
+): Promise<UserRecord> {
+  const cleanUser = username.trim();
+  const cleanName = displayName.trim() || cleanUser;
+  if (cleanUser.length < 3) {
+    throw new Error('Kullanıcı adı en az 3 karakter olmalıdır.');
+  }
+  if (password.length < 4) {
+    throw new Error('Şifre en az 4 karakter olmalıdır.');
+  }
+
+  const db = await getDatabase();
+  const existing = await db.getFirstAsync<{ id: number }>(
+    'SELECT id FROM users WHERE lower(username) = lower(?)',
+    [cleanUser]
+  );
+  if (existing) {
+    throw new Error('Bu kullanıcı adı zaten kayıtlı.');
+  }
+
+  const passHash = await hashPassword(password);
+  const now = new Date().toISOString();
+  const res = await db.runAsync(
+    'INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
+    [cleanUser, cleanName, passHash, 'user', now]
+  );
+
+  return {
+    id: Number(res.lastInsertRowId),
+    username: cleanUser,
+    displayName: cleanName,
+    role: 'user',
+    createdAt: now,
+  };
+}
+
+export async function adminResetUserPassword(
+  targetUserId: number,
+  newPassword: string
+): Promise<void> {
+  if (newPassword.length < 4) {
+    throw new Error('Yeni şifre en az 4 karakter olmalıdır.');
+  }
+  const db = await getDatabase();
+  const passHash = await hashPassword(newPassword);
+  await db.runAsync('UPDATE users SET password_hash = ? WHERE id = ?', [passHash, targetUserId]);
+}
+
+export async function adminDeleteUser(targetUserId: number): Promise<void> {
+  const db = await getDatabase();
+  const target = await db.getFirstAsync<{ id: number; username: string; role: string }>(
+    'SELECT id, username, role FROM users WHERE id = ?',
+    [targetUserId]
+  );
+  if (!target) {
+    throw new Error('Kullanıcı bulunamadı.');
+  }
+  if (resolveRole(String(target.username), target.role) === 'admin') {
+    throw new Error('Admin hesabı silinemez.');
+  }
+
+  const scanRows = await db.getAllAsync<{ snapshot_uri: string | null }>(
+    'SELECT snapshot_uri FROM scan_sessions WHERE user_id = ?',
+    [targetUserId]
+  );
+  for (const r of scanRows) {
+    if (r.snapshot_uri) {
+      deleteSandboxFileQuietly(r.snapshot_uri);
+    }
+  }
+
+  await db.runAsync('DELETE FROM users WHERE id = ?', [targetUserId]);
+}
+
+export async function adminListAllScanSessions(
+  limit = 100,
+  filterUserId?: number | null
+): Promise<AdminScanSessionRecord[]> {
+  const db = await getDatabase();
+  const hasFilter = typeof filterUserId === 'number' && filterUserId > 0;
+  const rows = await db.getAllAsync<any>(
+    `SELECT s.*, u.username, u.display_name,
+            (SELECT COUNT(*) FROM scan_session_tracks sst WHERE sst.session_id = s.id) AS track_count
+     FROM scan_sessions s
+     JOIN users u ON u.id = s.user_id
+     ${hasFilter ? 'WHERE s.user_id = ?' : ''}
+     ORDER BY s.created_at DESC
+     LIMIT ?`,
+    hasFilter ? [filterUserId, limit] : [limit]
+  );
+
+  return rows.map((r) => ({
+    id: Number(r.id),
+    userId: Number(r.user_id),
+    username: String(r.username || ''),
+    displayName: String(r.display_name || r.username || ''),
+    mood: (r.mood as MoodType) || 'neutral',
+    emotion: (r.emotion as EmotionType) || null,
+    confidence: Number(r.confidence || 0),
+    snapshotUri: r.snapshot_uri || null,
+    deviceLabel: String(r.device_label || 'iPhone 16 Pro'),
+    trackCount: Number(r.track_count || 0),
+    createdAt: String(r.created_at),
+  }));
+}
+
+export async function adminGetScanSessionWithTracks(
+  sessionId: number
+): Promise<AdminScanSessionRecord | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<any>(
+    `SELECT s.*, u.username, u.display_name
+     FROM scan_sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.id = ?`,
+    [sessionId]
+  );
+  if (!row) return null;
+
+  const ownerId = Number(row.user_id);
+  const trackRows = await db.getAllAsync<any>(
+    `SELECT t.*, CASE WHEN f.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+     FROM scan_session_tracks sst
+     JOIN tracks t ON t.id = sst.track_id
+     LEFT JOIN favorites f ON f.track_id = t.id AND f.user_id = ?
+     WHERE sst.session_id = ?
+     ORDER BY sst.position ASC`,
+    [ownerId, sessionId]
+  );
+
+  const tracks = trackRows.map(mapTrackRow);
+  return {
+    id: Number(row.id),
+    userId: ownerId,
+    username: String(row.username || ''),
+    displayName: String(row.display_name || row.username || ''),
+    mood: (row.mood as MoodType) || 'neutral',
+    emotion: (row.emotion as EmotionType) || null,
+    confidence: Number(row.confidence || 0),
+    snapshotUri: row.snapshot_uri || null,
+    deviceLabel: String(row.device_label || 'iPhone 16 Pro'),
+    trackCount: tracks.length,
+    createdAt: String(row.created_at),
+    tracks,
+  };
+}
+
+export async function adminDeleteScanSession(sessionId: number): Promise<void> {
+  const db = await getDatabase();
+  const existing = await db.getFirstAsync<{ snapshot_uri: string | null }>(
+    'SELECT snapshot_uri FROM scan_sessions WHERE id = ?',
+    [sessionId]
+  );
+  if (existing?.snapshot_uri) {
+    deleteSandboxFileQuietly(existing.snapshot_uri);
+  }
+  await db.runAsync('DELETE FROM scan_sessions WHERE id = ?', [sessionId]);
+}
+
+export async function adminListFavorites(limit = 100): Promise<AdminFavoriteRecord[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<any>(
+    `SELECT f.user_id, f.track_id, f.created_at,
+            u.username, u.display_name,
+            t.title, t.artist, t.mood, t.language
+     FROM favorites f
+     JOIN users u ON u.id = f.user_id
+     JOIN tracks t ON t.id = f.track_id
+     ORDER BY f.created_at DESC
+     LIMIT ?`,
+    [limit]
+  );
+
+  return rows.map((r) => ({
+    userId: Number(r.user_id),
+    username: String(r.username || ''),
+    displayName: String(r.display_name || r.username || ''),
+    trackId: Number(r.track_id),
+    title: String(r.title || ''),
+    artist: String(r.artist || ''),
+    mood: (r.mood as MoodType) || 'neutral',
+    language: r.language === 'tr' ? 'tr' : 'global',
+    createdAt: String(r.created_at),
+  }));
+}
+
+export async function adminDeleteTrack(trackId: number): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync('DELETE FROM tracks WHERE id = ?', [trackId]);
+}
+
+export async function adminCleanOrphanSnapshots(): Promise<number> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<{ snapshot_uri: string | null }>(
+    'SELECT snapshot_uri FROM scan_sessions WHERE snapshot_uri IS NOT NULL'
+  );
+  const activeUris = new Set(rows.map((r) => r.snapshot_uri).filter(Boolean) as string[]);
+
+  let removed = 0;
+  try {
+    const dir = new Directory(Paths.document, SNAPSHOTS_DIR_NAME);
+    if (dir.exists) {
+      for (const entry of dir.list()) {
+        if (entry instanceof File && !activeUris.has(entry.uri)) {
+          entry.delete();
+          removed++;
+        }
+      }
+    }
+  } catch {
+    // Ignore filesystem traversal error
+  }
+  return removed;
+}
+
+export async function adminInspectTable(
+  tableName: AdminTableName,
+  limit = 60
+): Promise<{ columns: string[]; rows: Record<string, unknown>[]; totalCount: number }> {
+  if (!ADMIN_ALLOWED_TABLES[tableName]) {
+    throw new Error('Geçersiz tablo adı.');
+  }
+
+  const db = await getDatabase();
+  const [colInfos, countRow, rawRows] = await Promise.all([
+    db.getAllAsync<{ name: string }>(`PRAGMA table_info(${tableName})`),
+    db.getFirstAsync<{ cnt: number }>(`SELECT COUNT(*) AS cnt FROM ${tableName}`),
+    db.getAllAsync<Record<string, unknown>>(
+      `SELECT * FROM ${tableName} ORDER BY rowid DESC LIMIT ?`,
+      [limit]
+    ),
+  ]);
+
+  return {
+    columns: colInfos.map((c) => c.name),
+    rows: rawRows.map(maskSensitiveRow),
+    totalCount: Number(countRow?.cnt || 0),
+  };
+}
+
+export async function adminRunReadOnlyQuery(sql: string): Promise<{
+  columns: string[];
+  rows: Record<string, unknown>[];
+  totalRows: number;
+  elapsedMs: number;
+}> {
+  const cleaned = sql.trim().replace(/;+\s*$/, '');
+  if (!cleaned) {
+    throw new Error('Çalıştırmak için bir SQL sorgusu yazın.');
+  }
+  if (cleaned.includes(';')) {
+    throw new Error('Güvenlik nedeniyle tek seferde yalnızca bir salt-okunur sorgu çalıştırılabilir.');
+  }
+  if (!/^(select|pragma|explain)\b/i.test(cleaned)) {
+    throw new Error('Konsol yalnızca SELECT, PRAGMA ve EXPLAIN sorgularını destekler.');
+  }
+
+  const db = await getDatabase();
+  const started = Date.now();
+  const allRows = await db.getAllAsync<Record<string, unknown>>(cleaned);
+  const elapsedMs = Math.max(1, Date.now() - started);
+
+  const maskedRows = allRows.slice(0, 100).map(maskSensitiveRow);
+  const columns = maskedRows.length > 0 ? Object.keys(maskedRows[0]) : [];
+
+  return {
+    columns,
+    rows: maskedRows,
+    totalRows: allRows.length,
+    elapsedMs,
   };
 }

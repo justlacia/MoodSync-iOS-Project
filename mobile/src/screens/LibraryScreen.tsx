@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -10,6 +10,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SpringPressable, StaggeredEntry } from '../components/MotionPrimitives';
 import { TrackRow } from '../components/TrackRow';
 import {
   fetchAndStoreOnlineSongs,
@@ -22,6 +23,7 @@ import { useTheme } from '../theme/ThemeContext';
 interface Props {
   userId: number;
   catalogTotal: number;
+  visitTick?: number;
   playingTrackId: number | null;
   isAudioPlaying: boolean;
   onPlayTrack: (queue: TrackRecord[], index: number) => void;
@@ -32,6 +34,7 @@ interface Props {
 export const LibraryScreen: React.FC<Props> = ({
   userId,
   catalogTotal,
+  visitTick = 0,
   playingTrackId,
   isAudioPlaying,
   onPlayTrack,
@@ -41,34 +44,62 @@ export const LibraryScreen: React.FC<Props> = ({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const [tracks, setTracks] = useState<TrackRecord[]>([]);
+  const [catalogState, setCatalogState] = useState<{
+    rows: TrackRecord[];
+    animKey: number;
+    hasLoaded: boolean;
+  }>({
+    rows: [],
+    animKey: 0,
+    hasLoaded: false,
+  });
   const [moodFilter, setMoodFilter] = useState<MoodType | ''>('');
   const [langFilter, setLangFilter] = useState<'tr' | 'global' | ''>('');
   const [favOnly, setFavOnly] = useState(false);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [fetchingOnline, setFetchingOnline] = useState(false);
-
-  const loadTracks = useCallback(async () => {
-    try {
-      const rows = await queryCatalogTracks({
-        userId,
-        mood: moodFilter,
-        language: langFilter,
-        search,
-        favoritesOnly: favOnly,
-        limit: 140,
-      });
-      setTracks(rows);
-    } catch {
-      // Ignore transient error
-    }
-  }, [favOnly, langFilter, moodFilter, search, userId]);
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
+    const trimmed = search.trim();
+    if (!trimmed) {
+      setDebouncedSearch('');
+      return;
+    }
     const timer = setTimeout(() => {
-      loadTracks();
+      setDebouncedSearch(trimmed);
     }, 180);
     return () => clearTimeout(timer);
+  }, [search]);
+
+  const loadTracks = useCallback(
+    async (shouldAnimate = true) => {
+      const reqId = ++requestIdRef.current;
+      try {
+        const rows = await queryCatalogTracks({
+          userId,
+          mood: moodFilter,
+          language: langFilter,
+          search: debouncedSearch,
+          favoritesOnly: favOnly,
+          limit: 140,
+        });
+        if (reqId !== requestIdRef.current) return;
+        setCatalogState((prev) => ({
+          rows,
+          animKey: shouldAnimate ? prev.animKey + 1 : prev.animKey,
+          hasLoaded: true,
+        }));
+      } catch {
+        // Ignore transient error
+      }
+    },
+    [debouncedSearch, favOnly, langFilter, moodFilter, userId]
+  );
+
+  useEffect(() => {
+    loadTracks(true);
   }, [loadTracks]);
 
   const handlePullOnline = async () => {
@@ -82,7 +113,7 @@ export const LibraryScreen: React.FC<Props> = ({
         customQuery: search.trim() || undefined,
       });
       onCatalogExpanded();
-      await loadTracks();
+      await loadTracks(true);
     } finally {
       setFetchingOnline(false);
     }
@@ -90,24 +121,25 @@ export const LibraryScreen: React.FC<Props> = ({
 
   return (
     <FlatList
-      data={tracks}
+      data={catalogState.rows}
       keyExtractor={(item) => String(item.id)}
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
       initialNumToRender={16}
       ListHeaderComponent={
         <View style={styles.header}>
-          <View style={styles.titleRow}>
+          <StaggeredEntry index={0} animationKey={visitTick} style={styles.titleRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.title}>Müzik Veritabanı</Text>
               <Text style={styles.subtitle}>
                 {catalogTotal} çevrimiçi şarkı senkronize edildi · Apple iTunes &amp; Deezer destekli
               </Text>
             </View>
-            <Pressable
+            <SpringPressable
+              haptic
               onPress={handlePullOnline}
               disabled={fetchingOnline}
-              style={({ pressed }) => [styles.onlineFetchBtn, pressed && { transform: [{ scale: 0.96 }] }]}
+              style={styles.onlineFetchBtn}
             >
               {fetchingOnline ? (
                 <ActivityIndicator size="small" color="#FFFFFF" />
@@ -117,10 +149,10 @@ export const LibraryScreen: React.FC<Props> = ({
                   <Text style={styles.onlineFetchText}>İnternetten Çek</Text>
                 </>
               )}
-            </Pressable>
-          </View>
+            </SpringPressable>
+          </StaggeredEntry>
 
-          <View style={styles.searchWrap}>
+          <StaggeredEntry index={1} animationKey={visitTick} style={styles.searchWrap}>
             <Ionicons name="search" size={18} color={colors.inkMuted} />
             <TextInput
               value={search}
@@ -136,70 +168,76 @@ export const LibraryScreen: React.FC<Props> = ({
                 <Ionicons name="close-circle" size={18} color={colors.inkMuted} />
               </Pressable>
             )}
-          </View>
+          </StaggeredEntry>
 
-          <View style={styles.filterGroup}>
+          <StaggeredEntry index={2} animationKey={visitTick} style={styles.filterGroup}>
             {([
               { key: '', label: 'Tüm Modlar' },
               { key: 'positive', label: 'Mutlu' },
               { key: 'neutral', label: 'Dingin' },
               { key: 'negative', label: 'Üzgün & Kızgın' },
             ] as const).map((m) => (
-              <Pressable
+              <SpringPressable
                 key={m.key || 'all'}
+                haptic
                 onPress={() => setMoodFilter(m.key)}
                 style={[styles.chip, moodFilter === m.key && styles.chipActive]}
               >
                 <Text style={[styles.chipText, moodFilter === m.key && styles.chipTextActive]}>
                   {m.label}
                 </Text>
-              </Pressable>
+              </SpringPressable>
             ))}
-          </View>
+          </StaggeredEntry>
 
-          <View style={styles.filterGroup}>
+          <StaggeredEntry index={3} animationKey={visitTick} style={styles.filterGroup}>
             {([
               { key: '', label: 'Tüm Diller' },
               { key: 'tr', label: 'Türkçe' },
               { key: 'global', label: 'Yabancı' },
             ] as const).map((lg) => (
-              <Pressable
+              <SpringPressable
                 key={lg.key || 'all-lang'}
+                haptic
                 onPress={() => setLangFilter(lg.key)}
                 style={[styles.chip, langFilter === lg.key && styles.chipActive]}
               >
                 <Text style={[styles.chipText, langFilter === lg.key && styles.chipTextActive]}>
                   {lg.label}
                 </Text>
-              </Pressable>
+              </SpringPressable>
             ))}
 
-            <Pressable
+            <SpringPressable
+              haptic
               onPress={() => setFavOnly((v) => !v)}
               style={[styles.chip, favOnly && styles.chipActive]}
             >
               <Text style={[styles.chipText, favOnly && styles.chipTextActive]}>♥ Favorilerim</Text>
-            </Pressable>
-          </View>
+            </SpringPressable>
+          </StaggeredEntry>
         </View>
       }
       ListEmptyComponent={
-        <View style={styles.emptyBox}>
-          <Text style={styles.emptyText}>
-            Aramana uygun yerel kayıt bulunamadı. &quot;İnternetten Çek&quot; tuşuyla çevrimiçi veritabanından anında ekleyebilirsin.
-          </Text>
-        </View>
+        catalogState.hasLoaded ? (
+          <StaggeredEntry index={1} animationKey={`${visitTick}-${catalogState.animKey}`} style={styles.emptyBox}>
+            <Text style={styles.emptyText}>
+              Aramana uygun yerel kayıt bulunamadı. &quot;İnternetten Çek&quot; tuşuyla çevrimiçi veritabanından anında ekleyebilirsin.
+            </Text>
+          </StaggeredEntry>
+        ) : undefined
       }
       renderItem={({ item, index }) => (
         <TrackRow
           track={item}
           index={index}
+          animationKey={`${visitTick}-${catalogState.animKey}`}
           isActiveTrack={playingTrackId === item.id}
           isPlaying={playingTrackId === item.id && isAudioPlaying}
-          onPlayPress={() => onPlayTrack(tracks, index)}
+          onPlayPress={() => onPlayTrack(catalogState.rows, index)}
           onToggleFavorite={async () => {
             await onToggleFavorite(item.id);
-            await loadTracks();
+            await loadTracks(false);
           }}
         />
       )}

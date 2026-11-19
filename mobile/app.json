@@ -14,6 +14,11 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.justlacia.moodsync",
+      "icon": {
+        "light": "./assets/icon.png",
+        "dark": "./assets/icon-dark.png",
+        "tinted": "./assets/icon-tinted.png"
+      },
       "infoPlist": {
         "NSCameraUsageDescription": "MoodSync, yüz ifadenizi canlı analiz edip o anki modunuza uygun şarkıları önermek için kameranızı kullanır.",
         "NSPhotoLibraryUsageDescription": "MoodSync, seçtiğiniz fotoğraftaki yüz ifadesine uygun şarkı listesi oluşturmak için fotoğraf arşivinize erişir.",

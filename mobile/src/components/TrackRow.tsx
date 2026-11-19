@@ -14,6 +14,8 @@ interface Props {
   onToggleFavorite: () => void;
   /** Optional index for smooth staggered top-to-bottom reveal animation */
   index?: number;
+  /** Override stagger delay index (useful when appending new tracks) */
+  staggerIndex?: number;
   /** Change this key (e.g. session ID) to replay the cascade animation */
   animationKey?: string | number;
 }
@@ -25,10 +27,15 @@ export const TrackRow: React.FC<Props> = ({
   onPlayPress,
   onToggleFavorite,
   index = 0,
+  staggerIndex,
   animationKey,
 }) => {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+
+  const effectiveStaggerIndex = staggerIndex ?? index;
+  const indexRef = useRef(effectiveStaggerIndex);
+  indexRef.current = effectiveStaggerIndex;
 
   const opacity = useRef(new Animated.Value(animationKey !== undefined ? 0 : 1)).current;
   const translateY = useRef(new Animated.Value(animationKey !== undefined ? -16 : 0)).current;
@@ -40,7 +47,7 @@ export const TrackRow: React.FC<Props> = ({
     translateY.setValue(-16);
     scale.setValue(0.96);
 
-    const delay = Math.min(index, 14) * 58;
+    const delay = Math.min(indexRef.current, 14) * 48;
     const anim = Animated.parallel([
       Animated.timing(opacity, {
         toValue: 1,
@@ -67,7 +74,7 @@ export const TrackRow: React.FC<Props> = ({
     ]);
     anim.start();
     return () => anim.stop();
-  }, [animationKey, index, opacity, scale, translateY]);
+  }, [animationKey, opacity, scale, translateY]);
 
   const handleExternalOpen = () => {
     const target = track.storeUrl || track.youtubeUrl;

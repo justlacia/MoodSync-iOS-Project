@@ -16,6 +16,11 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  AnimatedSegmentedControl,
+  SpringPressable,
+  StaggeredEntry,
+} from '../components/MotionPrimitives';
 import { loginUser, registerUser, UserRecord } from '../database/iosDatabase';
 import { ThemePalette } from '../theme/colors';
 import { useTheme } from '../theme/ThemeContext';
@@ -25,7 +30,7 @@ interface Props {
 }
 
 export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
-  const { colors } = useTheme();
+  const { colors, isDark } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -38,6 +43,8 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
 
   const cardOpacity = useRef(new Animated.Value(0)).current;
   const cardY = useRef(new Animated.Value(20)).current;
+  const logoScale = useRef(new Animated.Value(0.75)).current;
+  const errorShake = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     Animated.parallel([
@@ -53,8 +60,27 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
         stiffness: 150,
         useNativeDriver: true,
       }),
+      Animated.spring(logoScale, {
+        toValue: 1,
+        damping: 12,
+        stiffness: 160,
+        delay: 120,
+        useNativeDriver: true,
+      }),
     ]).start();
-  }, [cardOpacity, cardY]);
+  }, [cardOpacity, cardY, logoScale]);
+
+  useEffect(() => {
+    if (!errorMsg) return;
+    errorShake.setValue(0);
+    Animated.sequence([
+      Animated.timing(errorShake, { toValue: -8, duration: 55, useNativeDriver: true }),
+      Animated.timing(errorShake, { toValue: 8, duration: 55, useNativeDriver: true }),
+      Animated.timing(errorShake, { toValue: -6, duration: 55, useNativeDriver: true }),
+      Animated.timing(errorShake, { toValue: 5, duration: 55, useNativeDriver: true }),
+      Animated.timing(errorShake, { toValue: 0, duration: 55, useNativeDriver: true }),
+    ]).start();
+  }, [errorMsg, errorShake]);
 
   const handleSubmit = async () => {
     setErrorMsg(null);
@@ -107,41 +133,33 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
             ]}
           >
             <View style={styles.brandHeader}>
-              <Image source={require('../../assets/logo.png')} style={styles.logo} />
+              <Animated.Image
+                source={
+                  isDark ? require('../../assets/logo-dark.png') : require('../../assets/logo.png')
+                }
+                style={[styles.logo, { transform: [{ scale: logoScale }] }]}
+              />
               <Text style={styles.title}>MoodSync</Text>
               <Text style={styles.subtitle}>
                 Geçmiş taramalarınıza ve kişisel şarkı önerilerinize ulaşmak için giriş yapın.
               </Text>
             </View>
 
-            <View style={styles.segmented}>
-              <Pressable
-                onPress={() => {
-                  setMode('login');
-                  setErrorMsg(null);
-                }}
-                style={[styles.segTab, mode === 'login' && styles.segTabActive]}
-              >
-                <Text style={[styles.segText, mode === 'login' && styles.segTextActive]}>
-                  Giriş Yap
-                </Text>
-              </Pressable>
-
-              <Pressable
-                onPress={() => {
-                  setMode('register');
-                  setErrorMsg(null);
-                }}
-                style={[styles.segTab, mode === 'register' && styles.segTabActive]}
-              >
-                <Text style={[styles.segText, mode === 'register' && styles.segTextActive]}>
-                  Kayıt Ol
-                </Text>
-              </Pressable>
-            </View>
+            <AnimatedSegmentedControl<'login' | 'register'>
+              value={mode}
+              onChange={(next) => {
+                setMode(next);
+                setErrorMsg(null);
+              }}
+              options={[
+                { key: 'login', label: 'Giriş Yap' },
+                { key: 'register', label: 'Kayıt Ol' },
+              ]}
+              style={{ marginBottom: 20 }}
+            />
 
             {mode === 'register' && (
-              <View style={styles.fieldGroup}>
+              <StaggeredEntry index={0} direction="down" style={styles.fieldGroup}>
                 <Text style={styles.label}>Ad Soyad</Text>
                 <TextInput
                   value={displayName}
@@ -151,7 +169,7 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
                   style={styles.input}
                   autoCapitalize="words"
                 />
-              </View>
+              </StaggeredEntry>
             )}
 
             <View style={styles.fieldGroup}>
@@ -194,20 +212,20 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
             </View>
 
             {errorMsg && (
-              <View style={styles.errorBox}>
+              <Animated.View
+                style={[styles.errorBox, { transform: [{ translateX: errorShake }] }]}
+              >
                 <Ionicons name="alert-circle" size={17} color={colors.danger} />
                 <Text style={styles.errorText}>{errorMsg}</Text>
-              </View>
+              </Animated.View>
             )}
 
-            <Pressable
+            <SpringPressable
+              haptic
+              scaleTo={0.97}
               onPress={handleSubmit}
               disabled={loading}
-              style={({ pressed }) => [
-                styles.primaryBtn,
-                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-                loading && { opacity: 0.65 },
-              ]}
+              style={[styles.primaryBtn, loading && { opacity: 0.65 }]}
             >
               {loading ? (
                 <ActivityIndicator color="#FFFFFF" />
@@ -216,7 +234,7 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
                   {mode === 'login' ? 'Giriş Yap' : 'Hesap Oluştur ve Başla'}
                 </Text>
               )}
-            </Pressable>
+            </SpringPressable>
           </Animated.View>
         </ScrollView>
       </KeyboardAvoidingView>

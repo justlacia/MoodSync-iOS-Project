@@ -1,108 +1,112 @@
-# MoodSync iOS 🎵🎭
-> **On-Device Facial Emotion Recognition & AI Music Recommendation App for iOS**
-> *(Apple Vision & AffectNet ONNX Deep Learning • Native iOS React Native / Expo SDK 58 • SQLite • iTunes & Deezer API)*
+# MoodSync iOS 🎵✨
 
-<p align="center">
-  <img src="docs/moodsync-ios-oled.png" alt="MoodSync iOS — OLED Simsiyah Tema" width="46%" />
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/moodsync-ios-light.png" alt="MoodSync iOS — Klasik Fildişi Tema" width="46%" />
-</p>
-<p align="center">
-  <em>Sol: <b>OLED Simsiyah (#000000)</b> Tema • Sağ: <b>Klasik Fildişi</b> Tema (iPhone 16 Pro)</em>
-</p>
+> **Tamamen Cihaz İçi Yapay Zeka (AffectNet ONNX + Apple Vision) • iOS 26/27 Liquid Glass Arayüz • Anlık Müzik Keşif Platformu**
+
+![Version](https://img.shields.io/badge/version-v2.0.0-FF6242?style=for-the-badge)
+![Platform](https://img.shields.io/badge/iOS-26%20%2F%2027%20Liquid%20Glass-000000?style=for-the-badge&logo=apple)
+![AI](https://img.shields.io/badge/On--Device%20AI-AffectNet%20ONNX%20%2B%20Apple%20Vision-22C55E?style=for-the-badge)
 
 ---
 
-## 🌟 Proje Hakkında / Overview
+## 🌟 Proje Hakkında
 
-**MoodSync**, kullanıcının anlık yüz ifadesini derin öğrenme ve bilgisayarlı görü modelleri (**YOLOv8** & **AffectNet EfficientNet-B2**) ile gerçek zamanlı analiz edip, tespit edilen duygu durumuna en uygun müzikleri (**Apple iTunes** ve **Deezer** API entegrasyonuyla) öneren çok platformlu bir yapay zeka uygulamasıdır.
+**MoodSync**, hiçbir harici bilgisayara veya arka plan sunucusuna ihtiyaç duymadan tamamen **iPhone üzerinde çalışan (on-device)** bir duygu analizi ve müzik öneri uygulamasıdır.
 
-- **iPhone 16 Pro (ProMotion 120Hz) Native iOS Uygulaması:** OLED Simsiyah dahil 4 özel tema, akıcı 120Hz animasyonlar ve 30 saniyelik uygulama içi ses önizleme çaları.
-- **Derin Öğrenme Motoru (YOLOv8 + AffectNet 7-Duygu):** Yüz tespiti ve 5 temel duygu sınıfı (`Mutlu`, `Heyecanlı`, `Dingin`, `Üzgün`, `Kızgın`) yüksek doğrulukla analiz edilir.
-- **Esnek Çalışma Mimarisi:** Hem yerel ağ üzerinden Python AI sunucusuyla (`main`), hem de bilgisayardan %100 bağımsız olarak doğrudan iPhone işlemcisinde On-Device ONNX Runtime & SQLite ile (`standalone-ios`) çalışabilir.
+Yüz ifadenizi **AffectNet EfficientNet-B2 (ONNX)** ve **Apple Vision** motorlarıyla anında çözümler, ruh halinize en uygun Türkçe ve yabancı şarkıları **Apple iTunes** ve **Deezer** üzerinden bulur, uygulama içi **Liquid Glass Mini Oynatıcı** ile 30 saniyelik önizlemeleri çalar ve tüm geçmişinizi iPhone uygulama sandbox'ında yer alan yerel SQLite veritabanında güvenle saklar.
 
 ---
 
-## 🚀 Öne Çıkan Özellikler / Key Features
+## ✨ Neler Yapabilirsin?
 
-- 🎭 **5 Duygu Durumu Canlı Analizi:**
-  - 🟠 **Mutlu (Happy):** Yüksek enerjili, pozitif Pop ve Dans parçaları.
-  - 🟣 **Heyecanlı (Excited):** Yüksek tempolu parti, elektronik ve ritmik müzikler.
-  - 🟢 **Dingin (Calm):** Akustik, Ambient, Lo-Fi ve odaklanmaya yardımcı melodiler.
-  - 🔵 **Üzgün (Sad):** Melankolik, slow, indie ve derin duygusal parçalar.
-  - 🔴 **Kızgın (Angry):** Rock, Metal, Rap ve yüksek tempo deşarj şarkıları.
-- 📱 **Native iOS Deneyimi (React Native & Expo SDK 58):**
-  - `expo-camera` (`CameraView`) ile canlı yüz takip kadrajı, ayna görüntüsü (mirror) koruması ve sağ üst canlı duygu rozeti.
-  - `expo-audio` ile sessiz modda bile çalışan 30 saniyelik yüksek kaliteli şarkı önizleme çaları.
-  - **OLED Simsiyah (`#000000`)**, **Obsidyen Karbon**, **Gece İndigo** ve **Klasik Fildişi** temaları.
-  - 120Hz ProMotion uyumlu kademeli (staggered cascade) şarkı listesi geçiş animasyonları.
-- ⚡ **YOLOv8 & AffectNet Derin Öğrenme Motoru:**
-  - Yüz локаlizasyonu ve AffectNet EfficientNet-B2 (`affectnet_b2_7.onnx`) 7-sınıf duygu sınıflandırması ~50-80 ms gecikmeyle işlenir.
-- 🗄️ **SQLite Veritabanı & Canlı Müzik Kataloğu:**
-  - Kullanıcı hesapları (`SHA-256` parola özeti), favori şarkılar, geçmiş tarama oturumları ve Apple iTunes / Deezer API senkronizasyonu.
+### 🧊 iOS 26/27 Native Liquid Glass Deneyimi (120Hz ProMotion)
+- **Native Liquid Glass Tab Bar (`MoodSyncLiquidTabBarView`):** `UIGlassEffect` + `CADisplayLink` 120Hz yay fiziği, tek katmanlı akışkan cam balon, kısmi renk maskeleme (`CAShapeLayer`), prizmatik kenar parıltısı ve hem dokunarak hem basılı tutup kaydırarak pürüzsüz sekme geçişi.
+- **Liquid Glass Mini Audio Player:** Alttaki sekme çubuğuyla uyumlu yüzen kapsül oynatıcı, canlı ekolayzır çubukları, şarkı ilerleme göstergesi, sonraki parçaya geçiş ve tek dokunuşla çal/duraklat.
+- **Dark & Tinted Ana Ekran İkonları:** iOS Karanlık Mod ve Renklendirilmiş (Tinted) Ana Ekran simgeleri + uygulama içi dinamik koyu/açık tema logosu.
+- **4 Tema Seçeneği:** OLED Simsiyah (`#000000`), Obsidyen Karbon, Gece Mavisi ve Aydınlık tema.
+
+### 📸 Gizlilik Odaklı İsteğe Bağlı Kamera & Anında Çekim
+- **Sürekli Açık Kalmayan Kamera:** Ana sayfa açıldığında kamera varsayılan olarak kapalıdır; yalnızca **Kamerayı Başlat** tuşuna bastığında açılır.
+- **Akıllı Otomatik Kapanma:** Fotoğraf çekildiğinde, başka sekmeye geçildiğinde, uygulama arka plana alındığında veya 45 saniye işlem yapılmadığında pil ve gizlilik için kamera otomatik kapanır.
+- **Beklemeden Çekim & Arka Plan Analizi:** Canlı yüz algılamasını beklemeden kamerayı açar açmaz fotoğraf çekebilirsin; kamera hemen kapanır, duygu analizi ve şarkı listesi arka planda tamamlanır.
+- **Galeriden Fotoğraf Analizi:** İstersen kamerayı hiç açmadan iPhone fotoğraf arşivinden görsel seçerek analiz edebilirsin.
+
+### 🎭 5 Duygu Durumu & Akıllı Müzik Keşfi
+- 🟠 **Mutlu (Happy)** · 🟣 **Heyecanlı (Surprise)** · 🟢 **Dingin (Neutral)** · 🔵 **Üzgün (Sad)** · 🔴 **Kızgın (Angry)**
+- **Şarkıları Kalıcı Olarak Genişletme (`+5` / `+10` / `+15`):** Hem aktif taramada hem geçmiş taramalarda şarkı sayısını sonradan istediğin kadar artırabilir, yeni keşfedilen şarkıları SQLite oturumuna kalıcı olarak kaydedebilirsin.
+- **Şarkılar Kütüphanesi:** Mod, dil (`Türkçe` / `Yabancı`), favoriler ve anlık arama filtreleri ile yerel + çevrimiçi kataloğu yönetme.
+
+### 🕒 Geçmiş Taramalar & Özel Tarama Detayı (`ScanDetailScreen`)
+- Geçmiş sekmesindeki herhangi bir fotoğrafa veya karta dokunduğunda kameraya geri dönmeden o taramaya özel **Tarama Detayı** ekranı açılır.
+- Çekilen fotoğrafı tam ekran inceleyebilir, o anki duygu/güven skorunu görebilir, şarkıları dinleyip favorileyebilir ve `+5 / +10 / +15` seçenekleriyle listeyi genişletebilirsin.
+
+### 🛡️ Ayarlar & Admin Paneli (SQLite Gezgini)
+- **Ayarlar Sekmesi:** Tema seçimi, gizlilik & depolama özeti, geçmişi temizleme ve güvenli çıkış.
+- **Rol Tabanlı Yetkilendirme:** `haluk` hesabı otomatik `admin` rolüne sahiptir; yeni oluşturulan tüm hesaplar standart `user` olarak çalışır.
+- **Admin Paneli (`AdminPanelScreen`):**
+  - Veritabanı genel istatistikleri ve depolama temizliği (sahipsiz fotoğraf temizleyici)
+  - Kullanıcı yönetimi (hesap oluşturma, şifre sıfırlama, hesap silme)
+  - Tüm kullanıcıların tarama oturumlarını filtreleme ve inceleme
+  - Canlı **SQLite Tablo Gezgini** ve **Salt-Okunur SQL Sorgu Konsolu** (`SELECT`, `PRAGMA`, `EXPLAIN`)
 
 ---
 
-## 🏗️ Proje Mimarisi / Architecture
+## 🏗️ Proje Yapısı
 
 ```text
 MoodSync-iOS-Project/
-├── mobile/                     # React Native / Expo Native iOS Uygulaması
+├── mobile/                                 # Standalone Native iOS Uygulaması (Expo / React Native)
+│   ├── App.tsx                             # Ana navigasyon, ses kuyruğu ve oturum yönetimi
+│   ├── modules/moodsync-vision/            # Native Swift iOS Modülü
+│   │   ├── ios/MoodSyncVisionModule.swift  # AffectNet ONNX, Apple Vision, UIGlassEffect & 120Hz TabBar
+│   │   └── index.ts                        # JS/TS köprüsü
 │   ├── src/
-│   │   ├── screens/            # CameraStudioScreen, HistoryScreen, LibraryScreen, LoginScreen
-│   │   ├── components/         # AnimatedSplashScreen, MiniAudioPlayer, TrackRow
-│   │   ├── services/           # moodAiService, onlineMusicService
-│   │   ├── database/           # iosDatabase (SQLite & Session Yönetimi)
-│   │   └── theme/              # OLED & Koyu Tema Sistemi (ThemeContext, colors)
-│   ├── app.json
-│   └── metro.config.js         # Port :8081 -> :8000 AI Reverse Proxy
-├── webapp/                     # Python FastAPI AI & Veritabanı Sunucusu
-│   ├── app.py                  # REST API Sunucusu
-│   ├── detector_service.py     # YOLOv8 & AffectNet Yüz/Duygu Modeli
-│   ├── database.py             # SQLite Veritabanı Katmanı
-│   ├── music_service.py        # iTunes & Deezer Müzik Öneri Motoru
-│   └── requirements.txt
-├── src/MoodSync/               # C# .NET 8 Masaüstü Uygulaması
-├── yoloModels/                 # Eğitilmiş YOLOv8 Model Ağırlıkları
-├── start_ios.py                # Tek Komutla Birleşik Başlatıcı (macOS / Windows / Linux)
-└── start_ios.bat               # Tek Tıkla Hızlı Başlatıcı (Windows)
+│   │   ├── screens/
+│   │   │   ├── CameraStudioScreen.tsx      # İsteğe bağlı kamera, anında çekim & arka plan analizi
+│   │   │   ├── HistoryScreen.tsx           # Geçmiş taramalar listesi
+│   │   │   ├── ScanDetailScreen.tsx        # Geçmiş taramaya özel detay & şarkı genişletme ekranı
+│   │   │   ├── LibraryScreen.tsx           # Müzik veritabanı, filtreleme ve çevrimiçi çekim
+│   │   │   ├── SettingsScreen.tsx          # Tema, gizlilik, depolama ve hesap ayarları
+│   │   │   ├── AdminPanelScreen.tsx        # Admin paneli, kullanıcı yönetimi & SQL konsolu
+│   │   │   └── LoginScreen.tsx             # Giriş ve kayıt ekranı
+│   │   ├── components/
+│   │   │   ├── LiquidGlassTabBar.tsx       # Native iOS 26/27 Liquid Glass alt sekme çubuğu
+│   │   │   ├── LiquidGlassSurface.tsx      # Native UIGlassEffect sarmalayıcısı
+│   │   │   ├── MiniAudioPlayer.tsx         # Liquid Glass kapsül müzik çalar
+│   │   │   ├── MotionPrimitives.tsx        # Yay animasyonları ve geçiş bileşenleri
+│   │   │   └── TrackRow.tsx                # Şarkı satırı & kademeli giriş animasyonu
+│   │   ├── database/iosDatabase.ts         # Yerel SQLite şeması, oturum & admin API'leri
+│   │   └── services/                       # moodAiService & onlineMusicService (iTunes/Deezer)
+│   └── ios/MoodSync.xcworkspace            # Xcode iOS projesi
+├── CHANGELOG.md                            # Sürüm geçmişi ve detaylı değişiklik notları
+└── README.md
 ```
 
 ---
 
-## 🛠️ Kurulum ve Çalıştırma / Getting Started
+## 🛠️ Xcode ile iPhone'a Kurulum
 
-### Gereksinimler
-- **Python 3.10+**
-- **Node.js 18+** & npm
-- **iPhone** (Expo Go veya Xcode ile doğrudan cihaz kurulumu)
-
-### 1. Depoyu Klonlayın
-```bash
-git clone https://github.com/justlacia/MoodSync-iOS-Project.git
-cd MoodSync-iOS-Project
-```
-
-### 2. Bağımlılıkları Kurun
-```bash
-python -m venv .venv
-# Windows:
-.venv\Scripts\pip install -r webapp/requirements.txt
-# macOS / Linux:
-.venv/bin/pip install -r webapp/requirements.txt
-
-cd mobile
-npm install
-cd ..
-```
-
-### 3. Başlatın
-- **macOS / Linux:** `python start_ios.py`
-- **Windows:** `start_ios.bat` dosyasına çift tıklayın.
-- **Bağımsız (On-Device) Xcode Kurulumu:** `git checkout standalone-ios && ./mobile/scripts/install_iphone.sh`
+1. Depoyu klonlayın ve bağımlılıkları yükleyin:
+   ```bash
+   git clone https://github.com/justlacia/MoodSync-iOS-Project.git
+   cd MoodSync-iOS-Project/mobile
+   npm install
+   ```
+2. Xcode çalışma alanını açın:
+   ```bash
+   open ios/MoodSync.xcworkspace
+   ```
+3. Xcode'da **Signing & Capabilities** bölümünden kendi Apple Developer hesabınızı seçin, iPhone'unuzu bağlayın ve **Run (`⌘R`)** ile cihazınıza yükleyin.
 
 ---
 
-## 📄 Lisans / License
+## 📌 Sürüm Geçmişi
 
-Bu proje [MIT Lisansı](mobile/LICENSE) altında lisanslanmıştır.
+Tüm sürümler ve detaylı değişiklik kayıtları için [CHANGELOG.md](CHANGELOG.md) dosyasına göz atabilirsiniz.
+
+- **`v2.0.0`** — iOS 26/27 Native Liquid Glass Tab Bar & Mini Player, Admin Paneli & SQLite Gezgini, Ayarlar Sekmesi, Özel Tarama Detayı (`ScanDetailScreen`), Kalıcı Şarkı Genişletme (`+5/+10/+15`), Gizlilik Odaklı İsteğe Bağlı Kamera & Anında Çekim, Dark/Tinted Ana Ekran İkonları.
+
+---
+
+## 📄 Lisans
+
+Bu proje [MIT Lisansı](LICENSE) altında lisanslanmıştır.

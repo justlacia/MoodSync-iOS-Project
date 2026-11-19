@@ -8,7 +8,7 @@ interface Props {
 }
 
 export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
-  const { colors } = useTheme();
+  const { colors, isDark } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const logoScale = useRef(new Animated.Value(0.68)).current;
   const logoOpacity = useRef(new Animated.Value(0)).current;
@@ -151,7 +151,12 @@ export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
               },
             ]}
           >
-            <Image source={require('../../assets/logo.png')} style={styles.logoImage} />
+            <Image
+              source={
+                isDark ? require('../../assets/logo-dark.png') : require('../../assets/logo.png')
+              }
+              style={styles.logoImage}
+            />
           </Animated.View>
         </View>
 
