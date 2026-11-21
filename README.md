@@ -16,6 +16,27 @@ Yüz ifadenizi **AffectNet EfficientNet-B2 (ONNX)** ve **Apple Vision** motorlar
 
 ---
 
+## 📱 Ekran Görüntüleri
+
+<table>
+  <tr>
+    <td align="center"><b>Kamera</b></td>
+    <td align="center"><b>Geçmiş</b></td>
+    <td align="center"><b>Şarkılar</b></td>
+    <td align="center"><b>Ayarlar</b></td>
+    <td align="center"><b>Admin Paneli</b></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshot-1-camera.jpg" width="175" alt="Kamera" /></td>
+    <td><img src="docs/screenshot-2-history.jpg" width="175" alt="Geçmiş" /></td>
+    <td><img src="docs/screenshot-3-library.jpg" width="175" alt="Şarkılar" /></td>
+    <td><img src="docs/screenshot-4-settings.jpg" width="175" alt="Ayarlar" /></td>
+    <td><img src="docs/screenshot-5-admin.jpg" width="175" alt="Admin Paneli" /></td>
+  </tr>
+</table>
+
+---
+
 ## ✨ Neler Yapabilirsin?
 
 ### 🧊 iOS 26/27 Native Liquid Glass Deneyimi (120Hz ProMotion)
