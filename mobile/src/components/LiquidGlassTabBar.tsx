@@ -224,16 +224,22 @@ function JsFallbackLiquidTabBar<T extends string>({
         }
       }
 
-      const posStiffness = phys.isPressed ? 115 : 260;
-      const posDamping = phys.isPressed ? 18.5 : 26.5;
-      [phys.pos, phys.vel] = stepSpring(
-        phys.pos,
-        phys.vel,
-        effectiveTargetX,
-        posStiffness,
-        posDamping,
-        dt
-      );
+      if (phys.isPressed && phys.hasDragged) {
+        const halfDt = dt * 0.5;
+        [phys.pos, phys.vel] = stepSpring(phys.pos, phys.vel, effectiveTargetX, 620, 45, halfDt);
+        [phys.pos, phys.vel] = stepSpring(phys.pos, phys.vel, effectiveTargetX, 620, 45, halfDt);
+      } else {
+        const posStiffness = phys.isPressed ? 115 : 260;
+        const posDamping = phys.isPressed ? 18.5 : 26.5;
+        [phys.pos, phys.vel] = stepSpring(
+          phys.pos,
+          phys.vel,
+          effectiveTargetX,
+          posStiffness,
+          posDamping,
+          dt
+        );
+      }
       if (!phys.isPressed) {
         phys.pos = clamp(phys.pos, -4, maxTrack + 4);
       }

@@ -1282,10 +1282,16 @@ public final class MoodSyncLiquidTabBarView: ExpoView {
       }
     }
 
-    // Well-damped springs: silky drag tracking & zero wide overshoot on far tab taps
-    let posStiffness: CGFloat = isTouching ? 115 : 260
-    let posDamping: CGFloat = isTouching ? 18.5 : 26.5
-    (currentCenterX, velX) = stepSpring(currentCenterX, velX, effectiveTargetX, posStiffness, posDamping, dt)
+    // Well-damped springs: responsive drag tracking while preserving exact tap & snap feel
+    if isTouching && hasDragged {
+      let halfDt = dt * 0.5
+      (currentCenterX, velX) = stepSpring(currentCenterX, velX, effectiveTargetX, 620, 45.0, halfDt)
+      (currentCenterX, velX) = stepSpring(currentCenterX, velX, effectiveTargetX, 620, 45.0, halfDt)
+    } else {
+      let posStiffness: CGFloat = isTouching ? 115 : 260
+      let posDamping: CGFloat = isTouching ? 18.5 : 26.5
+      (currentCenterX, velX) = stepSpring(currentCenterX, velX, effectiveTargetX, posStiffness, posDamping, dt)
+    }
 
     if !isTouching {
       currentCenterX = clampVal(currentCenterX, firstX - 4.0, lastX + 4.0)
