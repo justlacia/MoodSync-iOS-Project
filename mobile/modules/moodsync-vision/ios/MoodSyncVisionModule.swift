@@ -2,6 +2,7 @@ import ExpoModulesCore
 import UIKit
 import Vision
 import CoreImage
+import ImageIO
 #if canImport(onnxruntime_objc)
 import onnxruntime_objc
 #endif
@@ -16,6 +17,8 @@ public class MoodSyncVisionModule: Module {
   private static var ortInputName: String = "input"
   private static var ortOutputName: String = "output"
   private static var ortInitialized = false
+  private static var coreMLActive = false
+  private static var warmupCompleted = false
   #endif
 
   private static let emotionLabelsTr: [String: String] = [
@@ -39,13 +42,26 @@ public class MoodSyncVisionModule: Module {
 
     Function("getEngineInfo") { () -> [String: Any] in
       let hasOnnx = Self.isAffectNetReady()
+      #if canImport(onnxruntime_objc)
+      let onnxLabel = Self.coreMLActive
+        ? "AffectNet EfficientNet-B2 · CoreML ANE"
+        : "AffectNet EfficientNet-B2 · Cihaz İçi AI"
+      #else
+      let onnxLabel = "AffectNet EfficientNet-B2 · Cihaz İçi AI"
+      #endif
       return [
         "available": true,
         "engine": hasOnnx ? "affectnet-onnx-ondevice" : "apple-vision",
         "label": hasOnnx
-          ? "AffectNet EfficientNet-B2 · Cihaz İçi AI"
+          ? onnxLabel
           : "Apple Vision · On-Device Yüz Analizi"
       ]
+    }
+
+    AsyncFunction("warmup") { () -> Bool in
+      return Self.inferenceQueue.sync {
+        return Self.warmupOnnxEngine()
+      }
     }
 
     AsyncFunction("analyzeBase64Frame") { (base64Input: String, isFinalCapture: Bool) -> [String: Any] in
@@ -158,7 +174,19 @@ public class MoodSyncVisionModule: Module {
     do {
       let env = try ORTEnv(loggingLevel: .warning)
       let options = try ORTSessionOptions()
+      try options.setGraphOptimizationLevel(.all)
       try options.setIntraOpNumThreads(4)
+      if ORTIsCoreMLExecutionProviderAvailable() {
+        let coreMLOptions = ORTCoreMLExecutionProviderOptions()
+        coreMLOptions.useCPUOnly = false
+        coreMLOptions.useCPUAndGPU = false
+        coreMLOptions.enableOnSubgraphs = true
+        coreMLOptions.onlyAllowStaticInputShapes = true
+        coreMLOptions.createMLProgram = true
+        if (try? options.appendCoreMLExecutionProvider(with: coreMLOptions)) != nil {
+          coreMLActive = true
+        }
+      }
       let session = try ORTSession(env: env, modelPath: modelPath, sessionOptions: options)
       let inputs = try session.inputNames()
       let outputs = try session.outputNames()
@@ -172,11 +200,41 @@ public class MoodSyncVisionModule: Module {
       ortSession = session
       return session
     } catch {
+      coreMLActive = false
       ortSession = nil
       return nil
     }
   }
   #endif
+
+  private static func warmupOnnxEngine() -> Bool {
+    #if canImport(onnxruntime_objc)
+    guard let session = ensureOnnxSession() else {
+      return false
+    }
+    if warmupCompleted {
+      return true
+    }
+    let size = 260
+    let byteCount = 3 * size * size * MemoryLayout<Float>.size
+    if let dummyData = NSMutableData(length: byteCount),
+       let inputTensor = try? ORTValue(
+         tensorData: dummyData,
+         elementType: .float,
+         shape: [1, 3, NSNumber(value: size), NSNumber(value: size)]
+       ) {
+      _ = try? session.run(
+        withInputs: [ortInputName: inputTensor],
+        outputNames: Set([ortOutputName]),
+        runOptions: nil
+      )
+    }
+    warmupCompleted = true
+    return true
+    #else
+    return false
+    #endif
+  }
 
   // MARK: - Main Analysis Pipeline
 
@@ -191,15 +249,16 @@ public class MoodSyncVisionModule: Module {
     guard
       let data = Data(base64Encoded: cleanedBase64, options: .ignoreUnknownCharacters),
       let uiImage = UIImage(data: data),
-      let normalizedImage = normalizeOrientation(uiImage),
-      let cgImage = normalizedImage.cgImage
+      let cgImage = uiImage.cgImage
     else {
       return notDetectedResult(engine: "affectnet-onnx-ondevice")
     }
 
+    let cgOrientation = cgImagePropertyOrientation(from: uiImage.imageOrientation)
+
     // 1. Hardware-accelerated face detection via Apple Vision (~5ms on iPhone 16 Pro)
     let faceRequest = VNDetectFaceRectanglesRequest()
-    let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+    let handler = VNImageRequestHandler(cgImage: cgImage, orientation: cgOrientation, options: [:])
     do {
       try handler.perform([faceRequest])
     } catch {
@@ -224,10 +283,17 @@ public class MoodSyncVisionModule: Module {
     let y2 = max(0.0, min(1.0, Double(1.0 - bbox.origin.y)))
     let faceBox: [Double] = [x1, y1, x2, y2]
 
-    // 2. Primary: Run exact AffectNet EfficientNet-B2 7-Emotion ONNX deep learning model on-device
+    let orientedCI = CIImage(cgImage: cgImage).oriented(cgOrientation)
+
+    // 2. Primary: Run AffectNet EfficientNet-B2 7-Emotion ONNX deep learning model on-device
     #if canImport(onnxruntime_objc)
     if let session = ensureOnnxSession(),
-       let onnxRes = classifyWithAffectNetONNX(session: session, cgImage: cgImage, faceBoxTopLeft: faceBox) {
+       let onnxRes = classifyWithAffectNetONNX(
+         session: session,
+         orientedCI: orientedCI,
+         faceObservation: primaryFace,
+         isFinalCapture: isFinalCapture
+       ) {
       let emotion = onnxRes.emotion
       let mood = emotionToMood[emotion] ?? "neutral"
       return [
@@ -244,13 +310,12 @@ public class MoodSyncVisionModule: Module {
     #endif
 
     // 3. Fallback only if ONNX model is unavailable
-    let ciImage = CIImage(cgImage: cgImage)
     let detector = CIDetector(
       ofType: CIDetectorTypeFace,
       context: ciContext,
       options: [CIDetectorAccuracy: isFinalCapture ? CIDetectorAccuracyHigh : CIDetectorAccuracyLow]
     )
-    let features = detector?.features(in: ciImage, options: [CIDetectorSmile: true]) as? [CIFaceFeature] ?? []
+    let features = detector?.features(in: orientedCI, options: [CIDetectorSmile: true]) as? [CIFaceFeature] ?? []
     let emotion = (features.first?.hasSmile ?? false) ? "happy" : "neutral"
     return [
       "detected": true,
@@ -277,41 +342,169 @@ public class MoodSyncVisionModule: Module {
     ]
   }
 
-  // MARK: - AffectNet EfficientNet-B2 7-Emotion Inference (Identical to webapp/detector_service.py)
+  // MARK: - AffectNet EfficientNet-B2 7-Emotion Inference
 
   #if canImport(onnxruntime_objc)
   private static func classifyWithAffectNetONNX(
     session: ORTSession,
-    cgImage: CGImage,
-    faceBoxTopLeft: [Double]
+    orientedCI: CIImage,
+    faceObservation: VNFaceObservation,
+    isFinalCapture: Bool
   ) -> (emotion: String, confidence: Double)? {
-    let imgW = Double(cgImage.width)
-    let imgH = Double(cgImage.height)
-    let bx1 = faceBoxTopLeft[0] * imgW
-    let by1 = faceBoxTopLeft[1] * imgH
-    let bx2 = faceBoxTopLeft[2] * imgW
-    let by2 = faceBoxTopLeft[3] * imgH
-    let bw = max(16.0, bx2 - bx1)
-    let bh = max(16.0, by2 - by1)
-
-    // Apple Vision boundingBox covers the tight face; add slight forehead/chin padding to match YOLOv8 + AffectNet crop
-    let cx1 = max(0.0, bx1 - bw * 0.04)
-    let cy1 = max(0.0, by1 - bh * 0.08)
-    let cx2 = min(imgW, bx2 + bw * 0.04)
-    let cy2 = min(imgH, by2 + bh * 0.06)
-    let cropRect = CGRect(
-      x: cx1,
-      y: cy1,
-      width: max(24.0, cx2 - cx1),
-      height: max(24.0, cy2 - cy1)
-    )
-
-    guard let cropped = cgImage.cropping(to: cropRect) else {
+    let extent = orientedCI.extent
+    guard extent.width > 0 && extent.height > 0 else {
       return nil
     }
 
+    let bbox = faceObservation.boundingBox
+    let bw = max(16.0, bbox.width * extent.width)
+    let bh = max(16.0, bbox.height * extent.height)
+    let centerX = extent.origin.x + (bbox.origin.x + bbox.width * 0.5) * extent.width
+    let centerY = extent.origin.y + (bbox.origin.y + bbox.height * 0.5) * extent.height
+
+    // Aspect-preserving square crop centered slightly upward toward forehead (CIImage origin is bottom-left)
+    let side = max(bw * 1.14, bh * 1.20)
+    let cropCenterY = centerY + bh * 0.03
+
+    var workingCI = orientedCI
+    if let roll = faceObservation.roll?.doubleValue, abs(roll) > 0.05 && abs(roll) < 0.78 {
+      let toOrigin = CGAffineTransform(translationX: -centerX, y: -cropCenterY)
+      let rotate = CGAffineTransform(rotationAngle: CGFloat(-roll))
+      let back = CGAffineTransform(translationX: centerX, y: cropCenterY)
+      workingCI = workingCI.transformed(by: toOrigin.concatenating(rotate).concatenating(back))
+    }
+
+    let rawCropRect = CGRect(
+      x: centerX - side * 0.5,
+      y: cropCenterY - side * 0.5,
+      width: side,
+      height: side
+    )
+    let cropRect = rawCropRect.intersection(workingCI.extent)
+    guard !cropRect.isNull && cropRect.width >= 24.0 && cropRect.height >= 24.0 else {
+      return nil
+    }
+
+    // Translate cropped face to (0, 0)
+    var faceCI = workingCI
+      .cropped(to: cropRect)
+      .transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
+
+    // Adaptive brightness normalization for low-light or overexposed selfies
+    let luma = estimateMeanLuminance(ciImage: faceCI)
+    if luma < 0.28 {
+      if let gammaFilter = CIFilter(name: "CIGammaAdjust") {
+        gammaFilter.setValue(faceCI, forKey: kCIInputImageKey)
+        gammaFilter.setValue(0.78, forKey: "inputPower")
+        if let out = gammaFilter.outputImage {
+          faceCI = out
+        }
+      }
+      if let colorFilter = CIFilter(name: "CIColorControls") {
+        colorFilter.setValue(faceCI, forKey: kCIInputImageKey)
+        colorFilter.setValue(1.06, forKey: kCIInputContrastKey)
+        if let out = colorFilter.outputImage {
+          faceCI = out
+        }
+      }
+    } else if luma > 0.82 {
+      if let gammaFilter = CIFilter(name: "CIGammaAdjust") {
+        gammaFilter.setValue(faceCI, forKey: kCIInputImageKey)
+        gammaFilter.setValue(1.15, forKey: "inputPower")
+        if let out = gammaFilter.outputImage {
+          faceCI = out
+        }
+      }
+    }
+
     let size = 260
-    guard let tensorData = makeNormalizedCHWData(cgImage: cropped, width: size, height: size) else {
+    let scaleX = CGFloat(size) / cropRect.width
+    let scaleY = CGFloat(size) / cropRect.height
+    let scaledCI = faceCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+    let targetRect = CGRect(x: 0, y: 0, width: size, height: size)
+
+    guard let croppedCG = ciContext.createCGImage(scaledCI, from: targetRect) else {
+      return nil
+    }
+
+    guard var logits = runOnnxLogits(session: session, cgImage: croppedCG, size: size, flipHorizontal: false) else {
+      return nil
+    }
+
+    if isFinalCapture,
+       let flippedLogits = runOnnxLogits(session: session, cgImage: croppedCG, size: size, flipHorizontal: true) {
+      for i in 0..<7 {
+        logits[i] = 0.5 * (logits[i] + flippedLogits[i])
+      }
+    }
+
+    // Softmax over 7 AffectNet classes:
+    // 0: Anger, 1: Disgust, 2: Fear, 3: Happiness, 4: Neutral, 5: Sadness, 6: Surprise
+    let maxLogit = logits.max() ?? 0.0
+    let exps = logits.map { exp($0 - maxLogit) }
+    let sumExps = max(1e-6, exps.reduce(0.0, +))
+    let probs = exps.map { $0 / sumExps }
+
+    let anger = probs[0]
+    let disgust = probs[1]
+    let fear = probs[2]
+    let happiness = probs[3]
+    let neutral = probs[4]
+    let sadness = probs[5]
+    let surprise = probs[6]
+
+    let disgustWeight = anger >= 0.14 ? 0.65 : 0.20
+    let angryScore = anger + disgust * disgustWeight
+    let sadScore = sadness + fear * 0.65
+    let happyScore = happiness
+    let surpriseScore = surprise
+    let neutralScore = neutral
+
+    let total = max(1e-6, angryScore + sadScore + happyScore + surpriseScore + neutralScore)
+    let emoScores: [String: Double] = [
+      "happy": happyScore / total,
+      "surprise": surpriseScore / total,
+      "neutral": neutralScore / total,
+      "sad": sadScore / total,
+      "angry": angryScore / total
+    ]
+
+    var bestEmotion = "neutral"
+    var bestProb = 0.0
+    for (k, v) in emoScores where v > bestProb {
+      bestEmotion = k
+      bestProb = v
+    }
+
+    if bestEmotion == "neutral" {
+      let expressive: [(String, Double)] = [
+        ("angry", emoScores["angry"] ?? 0),
+        ("sad", emoScores["sad"] ?? 0),
+        ("happy", emoScores["happy"] ?? 0),
+        ("surprise", emoScores["surprise"] ?? 0)
+      ]
+      if let top = expressive.max(by: { $0.1 < $1.1 }),
+         top.1 >= 0.30 && top.1 >= (emoScores["neutral"] ?? 0) * 0.68 {
+        bestEmotion = top.0
+        bestProb = min(0.96, top.1 / max(1e-6, top.1 + (emoScores["neutral"] ?? 0) * 0.45))
+      }
+    }
+
+    return (bestEmotion, bestProb)
+  }
+
+  private static func runOnnxLogits(
+    session: ORTSession,
+    cgImage: CGImage,
+    size: Int,
+    flipHorizontal: Bool
+  ) -> [Double]? {
+    guard let tensorData = makeNormalizedCHWData(
+      cgImage: cgImage,
+      width: size,
+      height: size,
+      flipHorizontal: flipHorizontal
+    ) else {
       return nil
     }
 
@@ -345,67 +538,44 @@ public class MoodSyncVisionModule: Module {
           logits[i] = Double(floats[i])
         }
       }
-
-      // Softmax over 7 AffectNet classes:
-      // 0: Anger, 1: Disgust, 2: Fear, 3: Happiness, 4: Neutral, 5: Sadness, 6: Surprise
-      let maxLogit = logits.max() ?? 0.0
-      let exps = logits.map { exp($0 - maxLogit) }
-      let sumExps = max(1e-6, exps.reduce(0.0, +))
-      let probs = exps.map { $0 / sumExps }
-
-      let anger = probs[0]
-      let disgust = probs[1]
-      let fear = probs[2]
-      let happiness = probs[3]
-      let neutral = probs[4]
-      let sadness = probs[5]
-      let surprise = probs[6]
-
-      // Exact scoring & selfie calibration from webapp/detector_service.py
-      let disgustWeight = anger >= 0.14 ? 0.65 : 0.20
-      let angryScore = anger + disgust * disgustWeight
-      let sadScore = sadness + fear * 0.65
-      let happyScore = happiness
-      let surpriseScore = surprise
-      let neutralScore = neutral
-
-      let total = max(1e-6, angryScore + sadScore + happyScore + surpriseScore + neutralScore)
-      let emoScores: [String: Double] = [
-        "happy": happyScore / total,
-        "surprise": surpriseScore / total,
-        "neutral": neutralScore / total,
-        "sad": sadScore / total,
-        "angry": angryScore / total
-      ]
-
-      var bestEmotion = "neutral"
-      var bestProb = 0.0
-      for (k, v) in emoScores where v > bestProb {
-        bestEmotion = k
-        bestProb = v
-      }
-
-      if bestEmotion == "neutral" {
-        let expressive: [(String, Double)] = [
-          ("angry", emoScores["angry"] ?? 0),
-          ("sad", emoScores["sad"] ?? 0),
-          ("happy", emoScores["happy"] ?? 0),
-          ("surprise", emoScores["surprise"] ?? 0)
-        ]
-        if let top = expressive.max(by: { $0.1 < $1.1 }),
-           top.1 >= 0.30 && top.1 >= (emoScores["neutral"] ?? 0) * 0.68 {
-          bestEmotion = top.0
-          bestProb = min(0.96, top.1 / max(1e-6, top.1 + (emoScores["neutral"] ?? 0) * 0.45))
-        }
-      }
-
-      return (bestEmotion, bestProb)
+      return logits
     } catch {
       return nil
     }
   }
 
-  private static func makeNormalizedCHWData(cgImage: CGImage, width: Int, height: Int) -> NSMutableData? {
+  private static func estimateMeanLuminance(ciImage: CIImage) -> Double {
+    guard let filter = CIFilter(
+      name: "CIAreaAverage",
+      parameters: [
+        kCIInputImageKey: ciImage,
+        kCIInputExtentKey: CIVector(cgRect: ciImage.extent)
+      ]
+    ), let output = filter.outputImage else {
+      return 0.5
+    }
+
+    var pixel = [UInt8](repeating: 128, count: 4)
+    ciContext.render(
+      output,
+      toBitmap: &pixel,
+      rowBytes: 4,
+      bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+      format: .RGBA8,
+      colorSpace: CGColorSpaceCreateDeviceRGB()
+    )
+    let r = Double(pixel[0]) / 255.0
+    let g = Double(pixel[1]) / 255.0
+    let b = Double(pixel[2]) / 255.0
+    return 0.299 * r + 0.587 * g + 0.114 * b
+  }
+
+  private static func makeNormalizedCHWData(
+    cgImage: CGImage,
+    width: Int,
+    height: Int,
+    flipHorizontal: Bool
+  ) -> NSMutableData? {
     let bytesPerPixel = 4
     let bytesPerRow = bytesPerPixel * width
     var rawBytes = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
@@ -428,16 +598,39 @@ public class MoodSyncVisionModule: Module {
 
     let planeSize = width * height
     var floats = [Float](repeating: 0.0, count: 3 * planeSize)
-    let mean: [Float] = [0.485, 0.456, 0.406]
-    let std: [Float] = [0.229, 0.224, 0.225]
 
-    for y in 0..<height {
-      for x in 0..<width {
-        let pixelIdx = (y * width + x) * bytesPerPixel
-        let outIdx = y * width + x
-        floats[outIdx] = (Float(rawBytes[pixelIdx]) / 255.0 - mean[0]) / std[0]
-        floats[planeSize + outIdx] = (Float(rawBytes[pixelIdx + 1]) / 255.0 - mean[1]) / std[1]
-        floats[2 * planeSize + outIdx] = (Float(rawBytes[pixelIdx + 2]) / 255.0 - mean[2]) / std[2]
+    let scaleR: Float = 1.0 / (255.0 * 0.229)
+    let biasR: Float = -0.485 / 0.229
+    let scaleG: Float = 1.0 / (255.0 * 0.224)
+    let biasG: Float = -0.456 / 0.224
+    let scaleB: Float = 1.0 / (255.0 * 0.225)
+    let biasB: Float = -0.406 / 0.225
+
+    rawBytes.withUnsafeBufferPointer { srcBuf in
+      floats.withUnsafeMutableBufferPointer { dstBuf in
+        guard let src = srcBuf.baseAddress, let dst = dstBuf.baseAddress else {
+          return
+        }
+        if !flipHorizontal {
+          for idx in 0..<planeSize {
+            let p = idx &* 4
+            dst[idx] = Float(src[p]) * scaleR + biasR
+            dst[planeSize &+ idx] = Float(src[p &+ 1]) * scaleG + biasG
+            dst[2 &* planeSize &+ idx] = Float(src[p &+ 2]) * scaleB + biasB
+          }
+        } else {
+          for y in 0..<height {
+            let rowBase = y &* width
+            for x in 0..<width {
+              let outIdx = rowBase &+ x
+              let srcX = (width &- 1) &- x
+              let p = (rowBase &+ srcX) &* 4
+              dst[outIdx] = Float(src[p]) * scaleR + biasR
+              dst[planeSize &+ outIdx] = Float(src[p &+ 1]) * scaleG + biasG
+              dst[2 &* planeSize &+ outIdx] = Float(src[p &+ 2]) * scaleB + biasB
+            }
+          }
+        }
       }
     }
 
@@ -447,15 +640,17 @@ public class MoodSyncVisionModule: Module {
 
   // MARK: - Orientation Helper
 
-  private static func normalizeOrientation(_ image: UIImage) -> UIImage? {
-    if image.imageOrientation == .up {
-      return image
-    }
-    let format = UIGraphicsImageRendererFormat()
-    format.scale = 1.0
-    let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
-    return renderer.image { _ in
-      image.draw(in: CGRect(origin: .zero, size: image.size))
+  private static func cgImagePropertyOrientation(from orientation: UIImage.Orientation) -> CGImagePropertyOrientation {
+    switch orientation {
+    case .up: return .up
+    case .down: return .down
+    case .left: return .left
+    case .right: return .right
+    case .upMirrored: return .upMirrored
+    case .downMirrored: return .downMirrored
+    case .leftMirrored: return .leftMirrored
+    case .rightMirrored: return .rightMirrored
+    @unknown default: return .up
     }
   }
 }

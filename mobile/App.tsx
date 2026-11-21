@@ -41,6 +41,7 @@ import { HistoryScreen } from './src/screens/HistoryScreen';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { LoginScreen } from './src/screens/LoginScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
+import { warmupAiEngine } from './src/services/moodAiService';
 import { resolvePlayablePreviewUrl } from './src/services/onlineMusicService';
 import { ThemePalette } from './src/theme/colors';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
@@ -131,6 +132,7 @@ function MainAppContent() {
     setAudioModeAsync({
       playsInSilentMode: true,
     }).catch(() => {});
+    void warmupAiEngine();
 
     (async () => {
       await getDatabase();

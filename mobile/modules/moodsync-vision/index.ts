@@ -94,6 +94,7 @@ export interface NativeEngineInfo {
 
 interface MoodSyncVisionNativeModule {
   getEngineInfo(): NativeEngineInfo;
+  warmup(): Promise<boolean>;
   analyzeBase64Frame(base64Input: string, isFinalCapture: boolean): Promise<NativeVisionResult>;
   excludeAppDataFromBackup(): boolean;
 }
@@ -128,6 +129,17 @@ export function getNativeEngineInfo(): NativeEngineInfo {
       engine: 'apple-vision',
       label: 'Apple Vision · On-Device Yüz Analizi',
     };
+  }
+}
+
+export async function warmupVisionEngine(): Promise<boolean> {
+  if (!nativeModule) {
+    return false;
+  }
+  try {
+    return await nativeModule.warmup();
+  } catch {
+    return false;
   }
 }
 

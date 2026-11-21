@@ -2,7 +2,7 @@
 
 > **Tamamen Cihaz İçi Yapay Zeka (AffectNet ONNX + Apple Vision) • iOS 26/27 Liquid Glass Arayüz • Anlık Müzik Keşif Platformu**
 
-![Version](https://img.shields.io/badge/version-v2.0.0-FF6242?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v2.1.0-FF6242?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/iOS-26%20%2F%2027%20Liquid%20Glass-000000?style=for-the-badge&logo=apple)
 ![AI](https://img.shields.io/badge/On--Device%20AI-AffectNet%20ONNX%20%2B%20Apple%20Vision-22C55E?style=for-the-badge)
 
@@ -103,6 +103,7 @@ MoodSync-iOS-Project/
 
 Tüm sürümler ve detaylı değişiklik kayıtları için [CHANGELOG.md](CHANGELOG.md) dosyasına göz atabilirsiniz.
 
+- **`v2.1.0`** — CoreML / Apple Neural Engine (ANE) ONNX hızlandırma, baş hizalama (`roll`), adaptif ışık dengelemesi, son çekimde yatay ayna TTA ve legacy YOLO/backend dosyalarının temizlenip saf iOS deposuna geçiş.
 - **`v2.0.0`** — iOS 26/27 Native Liquid Glass Tab Bar & Mini Player, Admin Paneli & SQLite Gezgini, Ayarlar Sekmesi, Özel Tarama Detayı (`ScanDetailScreen`), Kalıcı Şarkı Genişletme (`+5/+10/+15`), Gizlilik Odaklı İsteğe Bağlı Kamera & Anında Çekim, Dark/Tinted Ana Ekran İkonları.
 
 ---

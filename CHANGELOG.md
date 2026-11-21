@@ -1,5 +1,18 @@
 # Değişiklikler (Changelog)
 
+## v2.1.0 — 21 Kasım 2026
+
+### Hız & Doğruluk İyileştirmeleri (`MoodSyncVisionModule.swift`)
+- **CoreML / Apple Neural Engine (ANE) Hızlandırması:** `ORTCoreMLExecutionProviderOptions` (`MLProgram`, statik giriş şekilleri, subgraph desteği), `.all` graph optimizasyonu ve uygulama açılışında arka plan `warmup()` ön-derlemesi eklendi.
+- **Zero-Copy Yönlendirme & Hızlı Tensör Hazırlama:** Tam çözünürlükte yeniden çizim kaldırılarak `CGImagePropertyOrientation` ve `CIImage.oriented(...)` ile doğrudan kırpmaya geçildi; `makeNormalizedCHWData` doğrusal işaretçi döngüsüyle hızlandırıldı.
+- **Gelişmiş Yüz & Duygu Doğruluk Hattı:** `VNFaceObservation.roll` açısına göre baş hizalama, oran koruyan kare yüz kırpması, `CIAreaAverage` tabanlı düşük/yüksek ışık adaptif pozlama dengelemesi ve son çekimde yatay ayna (horizontal-flip) TTA logit ortalaması eklendi.
+
+### Saf iOS Depo Temizliği
+- Kullanılmayan legacy YOLO, C# masaüstü ve Python web/LAN backend dosyaları kaldırıldı (`Controllers/`, `Models/`, `Views/`, `src/`, `webapp/`, `yoloModels/`, `yolo_detect.py`, `run.py`, `start_ios.*`).
+- `mobile/metro.config.js` ve `mobile/src/services/moodAiService.ts` üzerindeki eski `/api/` proxy ve uzak sunucu fallback kodları temizlendi.
+
+---
+
 ## v2.0.0 — 19 Kasım 2026
 
 ### Yeni Özellikler
