@@ -12,6 +12,7 @@ interface Props {
   isActiveTrack: boolean;
   onPlayPress: () => void;
   onToggleFavorite: () => void;
+  onMorePress?: () => void;
   /** Optional index for smooth staggered top-to-bottom reveal animation */
   index?: number;
   /** Override stagger delay index (useful when appending new tracks) */
@@ -20,61 +21,75 @@ interface Props {
   animationKey?: string | number;
 }
 
-export const TrackRow: React.FC<Props> = ({
+const stylesCache = new WeakMap<ThemePalette, ReturnType<typeof createStyles>>();
+
+function getTrackRowStyles(colors: ThemePalette) {
+  let cached = stylesCache.get(colors);
+  if (!cached) {
+    cached = createStyles(colors);
+    stylesCache.set(colors, cached);
+  }
+  return cached;
+}
+
+export const TrackRow: React.FC<Props> = React.memo(({
   track,
   isPlaying,
   isActiveTrack,
   onPlayPress,
   onToggleFavorite,
+  onMorePress,
   index = 0,
   staggerIndex,
   animationKey,
 }) => {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const styles = useMemo(() => getTrackRowStyles(colors), [colors]);
 
   const effectiveStaggerIndex = staggerIndex ?? index;
+  const shouldAnimate = animationKey !== undefined && effectiveStaggerIndex < 8;
   const indexRef = useRef(effectiveStaggerIndex);
   indexRef.current = effectiveStaggerIndex;
+  const shouldAnimateRef = useRef(shouldAnimate);
+  shouldAnimateRef.current = shouldAnimate;
 
-  const opacity = useRef(new Animated.Value(animationKey !== undefined ? 0 : 1)).current;
-  const translateY = useRef(new Animated.Value(animationKey !== undefined ? -16 : 0)).current;
-  const scale = useRef(new Animated.Value(animationKey !== undefined ? 0.96 : 1)).current;
+  const opacity = useRef(new Animated.Value(shouldAnimate ? 0 : 1)).current;
+  const translateY = useRef(new Animated.Value(shouldAnimate ? -8 : 0)).current;
 
   useEffect(() => {
-    if (animationKey === undefined) return;
+    if (animationKey === undefined || !shouldAnimateRef.current) {
+      opacity.setValue(1);
+      translateY.setValue(0);
+      return;
+    }
     opacity.setValue(0);
-    translateY.setValue(-16);
-    scale.setValue(0.96);
+    translateY.setValue(-8);
 
-    const delay = Math.min(indexRef.current, 14) * 48;
+    const delay = indexRef.current * 20;
     const anim = Animated.parallel([
       Animated.timing(opacity, {
         toValue: 1,
-        duration: 340,
+        duration: 200,
         delay,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
-      Animated.spring(translateY, {
+      Animated.timing(translateY, {
         toValue: 0,
+        duration: 220,
         delay,
-        damping: 18,
-        stiffness: 170,
-        mass: 0.75,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scale, {
-        toValue: 1,
-        delay,
-        damping: 18,
-        stiffness: 180,
+        easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
     ]);
     anim.start();
     return () => anim.stop();
-  }, [animationKey, opacity, scale, translateY]);
+  }, [animationKey, opacity, translateY]);
+
+  const handlePlayPress = () => {
+    Haptics.selectionAsync().catch(() => {});
+    onPlayPress();
+  };
 
   const handleExternalOpen = () => {
     const target = track.storeUrl || track.youtubeUrl;
@@ -86,84 +101,102 @@ export const TrackRow: React.FC<Props> = ({
   return (
     <Animated.View
       style={[
-        styles.card,
-        isActiveTrack && styles.cardActive,
+        styles.cardOuter,
         {
           opacity,
-          transform: [{ translateY }, { scale }],
+          transform: [{ translateY }],
         },
       ]}
     >
       <Pressable
-        onPress={() => {
-          Haptics.selectionAsync().catch(() => {});
-          onPlayPress();
-        }}
-        style={({ pressed }) => [styles.coverWrap, pressed && { transform: [{ scale: 0.93 }] }]}
+        onPress={handlePlayPress}
+        style={({ pressed }) => [
+          styles.card,
+          isActiveTrack && styles.cardActive,
+          pressed && styles.cardPressed,
+        ]}
       >
-        {track.artworkUrl ? (
-          <Image source={{ uri: track.artworkUrl }} style={styles.coverImg} />
-        ) : (
-          <View style={[styles.coverImg, styles.coverFallback]}>
-            <Ionicons name="musical-notes" size={20} color={colors.brand} />
+        <View style={styles.coverWrap}>
+          {track.artworkUrl ? (
+            <Image source={{ uri: track.artworkUrl }} style={styles.coverImg} />
+          ) : (
+            <View style={[styles.coverImg, styles.coverFallback]}>
+              <Ionicons name="musical-notes" size={20} color={colors.brand} />
+            </View>
+          )}
+          <View style={[styles.playOverlay, isActiveTrack && styles.playOverlayVisible]}>
+            <Ionicons name={isPlaying ? 'pause' : 'play'} size={18} color="#FFFFFF" />
           </View>
-        )}
-        <View style={[styles.playOverlay, isActiveTrack && styles.playOverlayVisible]}>
-          <Ionicons name={isPlaying ? 'pause' : 'play'} size={18} color="#FFFFFF" />
         </View>
-      </Pressable>
 
-      <Pressable onPress={onPlayPress} style={styles.metaCol}>
-        <Text numberOfLines={1} style={[styles.title, isActiveTrack && { color: colors.brand }]}>
-          {track.title}
-        </Text>
-        <View style={styles.subRow}>
-          <View style={styles.langBadge}>
-            <Text style={styles.langText}>{track.language === 'tr' ? 'TR' : 'INT'}</Text>
-          </View>
-          <Text numberOfLines={1} style={styles.artistGenre}>
-            {track.artist} · {track.genre}
+        <View style={styles.metaCol}>
+          <Text numberOfLines={1} style={[styles.title, isActiveTrack && { color: colors.brand }]}>
+            {track.title}
           </Text>
+          <View style={styles.subRow}>
+            <View style={styles.langBadge}>
+              <Text style={styles.langText}>{track.language === 'tr' ? 'TR' : 'INT'}</Text>
+            </View>
+            <Text numberOfLines={1} style={styles.artistGenre}>
+              {track.artist} · {track.genre}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.actionsRow}>
+          <Pressable
+            onPress={(e) => {
+              e.stopPropagation();
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+              onToggleFavorite();
+            }}
+            hitSlop={4}
+            style={({ pressed }) => [styles.iconBtn, pressed && { transform: [{ scale: 0.85 }] }]}
+          >
+            <Ionicons
+              name={track.isFavorite ? 'heart' : 'heart-outline'}
+              size={21}
+              color={track.isFavorite ? colors.brand : colors.inkMuted}
+            />
+          </Pressable>
+
+          <Pressable
+            onPress={(e) => {
+              e.stopPropagation();
+              if (onMorePress) {
+                Haptics.selectionAsync().catch(() => {});
+                onMorePress();
+              } else {
+                handleExternalOpen();
+              }
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 4, right: 6 }}
+            style={({ pressed }) => [styles.openPill, pressed && { opacity: 0.7 }]}
+          >
+            <Ionicons
+              name={onMorePress ? 'ellipsis-horizontal' : 'open-outline'}
+              size={15}
+              color={colors.inkSecondary}
+            />
+          </Pressable>
         </View>
       </Pressable>
-
-      <View style={styles.actionsRow}>
-        <Pressable
-          onPress={() => {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-            onToggleFavorite();
-          }}
-          hitSlop={8}
-          style={({ pressed }) => [styles.iconBtn, pressed && { transform: [{ scale: 0.85 }] }]}
-        >
-          <Ionicons
-            name={track.isFavorite ? 'heart' : 'heart-outline'}
-            size={21}
-            color={track.isFavorite ? colors.brand : colors.inkMuted}
-          />
-        </Pressable>
-
-        <Pressable
-          onPress={handleExternalOpen}
-          hitSlop={6}
-          style={({ pressed }) => [styles.openPill, pressed && { opacity: 0.7 }]}
-        >
-          <Ionicons name="open-outline" size={15} color={colors.inkSecondary} />
-        </Pressable>
-      </View>
     </Animated.View>
   );
-};
+});
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
+    cardOuter: {
+      marginBottom: 8,
+    },
     card: {
       flexDirection: 'row',
       alignItems: 'center',
+      height: 70,
       backgroundColor: colors.elevated,
       borderRadius: 16,
       padding: 9,
-      marginBottom: 8,
       borderWidth: 1,
       borderColor: colors.hairline,
       gap: 11,
@@ -171,6 +204,10 @@ const createStyles = (colors: ThemePalette) =>
     cardActive: {
       backgroundColor: colors.brandSoft,
       borderColor: colors.brand,
+    },
+    cardPressed: {
+      opacity: 0.86,
+      transform: [{ scale: 0.985 }],
     },
     coverWrap: {
       width: 50,

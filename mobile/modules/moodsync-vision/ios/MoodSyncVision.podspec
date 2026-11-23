@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   s.dependency 'onnxruntime-objc'
 
-  s.frameworks     = 'Vision', 'CoreImage', 'UIKit', 'Accelerate'
+  s.frameworks     = 'Vision', 'CoreImage', 'UIKit', 'Accelerate', 'LocalAuthentication', 'Security', 'MediaPlayer'
   s.source_files   = '**/*.{h,m,mm,swift,hpp,cpp}'
   s.resources      = ['Models/affectnet_b2_7.onnx']
 

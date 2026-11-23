@@ -276,3 +276,88 @@ export function emotionToMood(emotion: EmotionType): MoodType {
   if (emotion === 'neutral') return 'neutral';
   return 'negative';
 }
+
+export type EmotionScores = Record<EmotionType, number>;
+
+export const ALL_EMOTIONS: EmotionType[] = ['happy', 'surprise', 'neutral', 'sad', 'angry'];
+
+export type MoodStrategy = 'match' | 'uplift';
+
+export const JOURNAL_QUICK_TAGS = [
+  'Kahve',
+  'İş',
+  'Spor',
+  'Gece',
+  'Arkadaşlar',
+  'Yürüyüş',
+  'Ders',
+  'Yolculuk',
+] as const;
+
+export function resolveTargetMoodForStrategy(
+  detectedEmotion: EmotionType | null | undefined,
+  detectedMood: MoodType,
+  strategy: MoodStrategy
+): {
+  targetMood: MoodType;
+  targetEmotion: EmotionType;
+  titleTr: string;
+  descriptionTr: string;
+} {
+  const baseEmotion: EmotionType =
+    detectedEmotion && ALL_EMOTIONS.includes(detectedEmotion)
+      ? detectedEmotion
+      : detectedMood === 'positive'
+        ? 'happy'
+        : detectedMood === 'negative'
+          ? 'sad'
+          : 'neutral';
+
+  if (strategy === 'match') {
+    const visual = resolveMoodVisual(detectedMood, baseEmotion);
+    return {
+      targetMood: detectedMood,
+      targetEmotion: baseEmotion,
+      titleTr: 'Moduma Eşlik Et',
+      descriptionTr: visual.subtitle,
+    };
+  }
+
+  switch (baseEmotion) {
+    case 'sad':
+      return {
+        targetMood: 'positive',
+        targetEmotion: 'happy',
+        titleTr: 'Modumu Yükselt',
+        descriptionTr: 'Modunu nazikçe pozitife ve enerjiye taşıyan parçalar',
+      };
+    case 'angry':
+      return {
+        targetMood: 'neutral',
+        targetEmotion: 'neutral',
+        titleTr: 'Modumu Yükselt',
+        descriptionTr: 'Gerginliği azaltıp zihnini dengeleyen dingin seçki',
+      };
+    case 'neutral':
+      return {
+        targetMood: 'positive',
+        targetEmotion: 'happy',
+        titleTr: 'Modumu Yükselt',
+        descriptionTr: 'Dinginlikten neşeli ve enerjik ritme geçiren seçki',
+      };
+    case 'happy':
+      return {
+        targetMood: 'positive',
+        targetEmotion: 'surprise',
+        titleTr: 'Modumu Yükselt',
+        descriptionTr: 'Yüksek enerjini zirvede tutan tempolu ve dinamik seçki',
+      };
+    case 'surprise':
+      return {
+        targetMood: 'positive',
+        targetEmotion: 'happy',
+        titleTr: 'Modumu Yükselt',
+        descriptionTr: 'Heyecanını neşeli ve akıcı ritimle besleyen seçki',
+      };
+  }
+}

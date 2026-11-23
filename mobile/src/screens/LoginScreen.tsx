@@ -5,7 +5,6 @@ import {
   ActivityIndicator,
   Animated,
   Easing,
-  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -17,11 +16,22 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
+  BiometricCapabilities,
+  getBiometricCapabilities,
+} from '../../modules/moodsync-vision';
+import {
   AnimatedSegmentedControl,
   SpringPressable,
   StaggeredEntry,
 } from '../components/MotionPrimitives';
-import { loginUser, registerUser, UserRecord } from '../database/iosDatabase';
+import {
+  authenticateWithBiometric,
+  BiometricBindingInfo,
+  getBiometricBinding,
+  loginUser,
+  registerUser,
+  UserRecord,
+} from '../database/iosDatabase';
 import { ThemePalette } from '../theme/colors';
 import { useTheme } from '../theme/ThemeContext';
 
@@ -39,6 +49,9 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [bioBusy, setBioBusy] = useState(false);
+  const [bioCaps, setBioCaps] = useState<BiometricCapabilities>(() => getBiometricCapabilities());
+  const [bioBinding, setBioBinding] = useState<BiometricBindingInfo | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const cardOpacity = useRef(new Animated.Value(0)).current;
@@ -47,7 +60,14 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
   const errorShake = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.parallel([
+    setBioCaps(getBiometricCapabilities());
+    getBiometricBinding()
+      .then((binding) => setBioBinding(binding))
+      .catch(() => setBioBinding(null));
+  }, []);
+
+  useEffect(() => {
+    const anim = Animated.parallel([
       Animated.timing(cardOpacity, {
         toValue: 1,
         duration: 420,
@@ -67,20 +87,49 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
         delay: 120,
         useNativeDriver: true,
       }),
-    ]).start();
+    ]);
+    anim.start();
+    return () => anim.stop();
   }, [cardOpacity, cardY, logoScale]);
 
   useEffect(() => {
     if (!errorMsg) return;
     errorShake.setValue(0);
-    Animated.sequence([
+    const shakeAnim = Animated.sequence([
       Animated.timing(errorShake, { toValue: -8, duration: 55, useNativeDriver: true }),
       Animated.timing(errorShake, { toValue: 8, duration: 55, useNativeDriver: true }),
       Animated.timing(errorShake, { toValue: -6, duration: 55, useNativeDriver: true }),
       Animated.timing(errorShake, { toValue: 5, duration: 55, useNativeDriver: true }),
       Animated.timing(errorShake, { toValue: 0, duration: 55, useNativeDriver: true }),
-    ]).start();
+    ]);
+    shakeAnim.start();
+    return () => shakeAnim.stop();
   }, [errorMsg, errorShake]);
+
+  const handleBiometricLogin = async () => {
+    if (bioBusy || loading || !bioBinding) return;
+    setErrorMsg(null);
+    setBioBusy(true);
+    try {
+      const res = await authenticateWithBiometric(
+        `MoodSync hesabınıza giriş yapmak için ${bioCaps.label} doğrulayın`
+      );
+      if (res.user) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        onAuthenticated(res.user);
+        return;
+      }
+      if (res.invalidated) {
+        setBioBinding(null);
+      }
+      if (!res.cancelled && res.error) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+        setErrorMsg(res.error);
+      }
+    } finally {
+      setBioBusy(false);
+    }
+  };
 
   const handleSubmit = async () => {
     setErrorMsg(null);
@@ -112,6 +161,9 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
       setLoading(false);
     }
   };
+
+  const biometricIcon =
+    bioCaps.biometryType === 'touchID' ? 'finger-print-outline' : 'scan-outline';
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -224,8 +276,8 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
               haptic
               scaleTo={0.97}
               onPress={handleSubmit}
-              disabled={loading}
-              style={[styles.primaryBtn, loading && { opacity: 0.65 }]}
+              disabled={loading || bioBusy}
+              style={[styles.primaryBtn, (loading || bioBusy) && { opacity: 0.65 }]}
             >
               {loading ? (
                 <ActivityIndicator color="#FFFFFF" />
@@ -235,6 +287,39 @@ export const LoginScreen: React.FC<Props> = ({ onAuthenticated }) => {
                 </Text>
               )}
             </SpringPressable>
+
+            {mode === 'login' && bioCaps.available && bioBinding && (
+              <View style={styles.bioSection}>
+                <View style={styles.dividerRow}>
+                  <View style={styles.dividerLine} />
+                  <Text style={styles.dividerText}>veya</Text>
+                  <View style={styles.dividerLine} />
+                </View>
+
+                <SpringPressable
+                  haptic
+                  scaleTo={0.97}
+                  disabled={bioBusy || loading}
+                  onPress={handleBiometricLogin}
+                  style={[styles.bioBtn, bioBusy && { opacity: 0.65 }]}
+                >
+                  {bioBusy ? (
+                    <ActivityIndicator color={colors.brand} />
+                  ) : (
+                    <>
+                      <Ionicons name={biometricIcon} size={20} color={colors.brand} />
+                      <Text style={styles.bioBtnText}>{`${bioCaps.label} Girişi`}</Text>
+                    </>
+                  )}
+                </SpringPressable>
+              </View>
+            )}
+
+            {mode === 'login' && bioCaps.available && !bioBinding && (
+              <Text style={styles.bioHintText}>
+                İpucu: Giriş yaptıktan sonra Ayarlar’dan {bioCaps.label}’yi hesabınızla eşleştirebilirsiniz.
+              </Text>
+            )}
           </Animated.View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -373,5 +458,64 @@ const createStyles = (colors: ThemePalette) =>
       color: '#FFFFFF',
       fontSize: 15.5,
       fontWeight: '700',
+    },
+    bioSection: {
+      marginTop: 14,
+    },
+    dividerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      marginBottom: 12,
+    },
+    dividerLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: colors.hairline,
+    },
+    dividerText: {
+      fontSize: 11.5,
+      fontWeight: '700',
+      color: colors.inkMuted,
+    },
+    bioBtn: {
+      minHeight: 50,
+      borderRadius: 14,
+      backgroundColor: colors.brandSoft,
+      borderWidth: 1.2,
+      borderColor: colors.brand,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 14,
+      gap: 8,
+    },
+    bioBtnText: {
+      fontSize: 14.5,
+      fontWeight: '800',
+      color: colors.brand,
+    },
+    bioUserPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.hairlineStrong,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 999,
+    },
+    bioUserText: {
+      fontSize: 11.5,
+      fontWeight: '700',
+      color: colors.inkPrimary,
+    },
+    bioHintText: {
+      marginTop: 14,
+      fontSize: 11.5,
+      color: colors.inkMuted,
+      textAlign: 'center',
+      lineHeight: 16,
     },
   });

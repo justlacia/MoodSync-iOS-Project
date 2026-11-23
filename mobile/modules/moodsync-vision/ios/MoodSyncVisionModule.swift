@@ -3,6 +3,9 @@ import UIKit
 import Vision
 import CoreImage
 import ImageIO
+import LocalAuthentication
+import Security
+import MediaPlayer
 #if canImport(onnxruntime_objc)
 import onnxruntime_objc
 #endif
@@ -10,6 +13,12 @@ import onnxruntime_objc
 public class MoodSyncVisionModule: Module {
   private static let inferenceQueue = DispatchQueue(label: "com.moodsync.affectnet.inference", qos: .userInitiated)
   private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+  private static let biometricKeychainService = "com.justlacia.moodsync.biometric.auth"
+  private static let biometricKeychainAccount = "linked_account_token"
+
+  private var nextTrackRemoteTarget: Any?
+  private var prevTrackRemoteTarget: Any?
+  private var remoteCommandWorkItem: DispatchWorkItem?
 
   #if canImport(onnxruntime_objc)
   private static var ortEnv: ORTEnv?
@@ -39,6 +48,12 @@ public class MoodSyncVisionModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("MoodSyncVision")
+
+    Events("onRemoteTrackCommand")
+
+    OnDestroy {
+      self.clearRemoteTrackTargetsSync()
+    }
 
     Function("getEngineInfo") { () -> [String: Any] in
       let hasOnnx = Self.isAffectNetReady()
@@ -88,6 +103,253 @@ public class MoodSyncVisionModule: Module {
         }
       }
       return true
+    }
+
+    Function("getBiometricCapabilities") { () -> [String: Any] in
+      let context = LAContext()
+      var authError: NSError?
+      let canEvaluate = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &authError)
+
+      var biometryType = "none"
+      var label = "Biyometrik"
+      switch context.biometryType {
+      case .faceID:
+        biometryType = "faceID"
+        label = "Face ID"
+      case .touchID:
+        biometryType = "touchID"
+        label = "Touch ID"
+      default:
+        if #available(iOS 17.0, *), context.biometryType == .opticID {
+          biometryType = "opticID"
+          label = "Optic ID"
+        }
+      }
+
+      var result: [String: Any] = [
+        "available": canEvaluate,
+        "biometryType": biometryType,
+        "label": label
+      ]
+      if let err = authError {
+        result["errorCode"] = err.code
+      }
+      return result
+    }
+
+    AsyncFunction("enrollBiometricToken") { (token: String, reason: String, promise: Promise) in
+      let context = LAContext()
+      context.localizedFallbackTitle = ""
+      var authError: NSError?
+      guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &authError) else {
+        promise.resolve([
+          "success": false,
+          "cancelled": false,
+          "error": Self.mapBiometricError(authError)
+        ])
+        return
+      }
+
+      guard let tokenData = token.data(using: .utf8) else {
+        promise.resolve([
+          "success": false,
+          "cancelled": false,
+          "error": "Geçersiz biyometrik oturum anahtarı."
+        ])
+        return
+      }
+
+      context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { success, evalError in
+        if !success {
+          let nsErr = evalError as NSError?
+          let cancelled = Self.isBiometricCancelled(nsErr)
+          promise.resolve([
+            "success": false,
+            "cancelled": cancelled,
+            "error": Self.mapBiometricError(nsErr)
+          ])
+          return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+          let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.biometricKeychainService,
+            kSecAttrAccount as String: Self.biometricKeychainAccount
+          ]
+          SecItemDelete(deleteQuery as CFDictionary)
+
+          var accessError: Unmanaged<CFError>?
+          guard let accessControl = SecAccessControlCreateWithFlags(
+            kCFAllocatorDefault,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            .biometryCurrentSet,
+            &accessError
+          ) else {
+            promise.resolve([
+              "success": false,
+              "cancelled": false,
+              "error": "Keychain biyometrik erişim kontrolü oluşturulamadı."
+            ])
+            return
+          }
+
+          let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.biometricKeychainService,
+            kSecAttrAccount as String: Self.biometricKeychainAccount,
+            kSecValueData as String: tokenData,
+            kSecAttrAccessControl as String: accessControl
+          ]
+
+          let status = SecItemAdd(addQuery as CFDictionary, nil)
+          if status == errSecSuccess {
+            promise.resolve(["success": true])
+          } else {
+            promise.resolve([
+              "success": false,
+              "cancelled": false,
+              "error": "Keychain kaydı başarısız oldu (kod: \(status))."
+            ])
+          }
+        }
+      }
+    }
+
+    AsyncFunction("authenticateBiometricToken") { (reason: String, promise: Promise) in
+      let context = LAContext()
+      context.localizedFallbackTitle = ""
+      var authError: NSError?
+      guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &authError) else {
+        promise.resolve([
+          "success": false,
+          "cancelled": false,
+          "invalidated": false,
+          "error": Self.mapBiometricError(authError)
+        ])
+        return
+      }
+
+      context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { success, evalError in
+        if !success {
+          let nsErr = evalError as NSError?
+          let cancelled = Self.isBiometricCancelled(nsErr)
+          promise.resolve([
+            "success": false,
+            "cancelled": cancelled,
+            "invalidated": false,
+            "error": Self.mapBiometricError(nsErr)
+          ])
+          return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+          let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.biometricKeychainService,
+            kSecAttrAccount as String: Self.biometricKeychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
+          ]
+
+          var item: CFTypeRef?
+          let status = SecItemCopyMatching(query as CFDictionary, &item)
+          if status == errSecSuccess,
+             let data = item as? Data,
+             let token = String(data: data, encoding: .utf8) {
+            promise.resolve([
+              "success": true,
+              "token": token,
+              "invalidated": false
+            ])
+          } else if status == errSecItemNotFound {
+            promise.resolve([
+              "success": false,
+              "cancelled": false,
+              "invalidated": true,
+              "error": "Face ID kaydı bulunamadı veya cihaz Face ID ayarları değiştiği için sıfırlandı."
+            ])
+          } else if status == errSecUserCanceled {
+            promise.resolve([
+              "success": false,
+              "cancelled": true,
+              "invalidated": false,
+              "error": "Face ID doğrulaması iptal edildi."
+            ])
+          } else {
+            promise.resolve([
+              "success": false,
+              "cancelled": false,
+              "invalidated": false,
+              "error": "Keychain biyometrik doğrulama hatası (kod: \(status))."
+            ])
+          }
+        }
+      }
+    }
+
+    Function("clearBiometricToken") { () -> Bool in
+      let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: Self.biometricKeychainService,
+        kSecAttrAccount as String: Self.biometricKeychainAccount
+      ]
+      let status = SecItemDelete(query as CFDictionary)
+      return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    Function("hasBiometricToken") { () -> Bool in
+      let context = LAContext()
+      context.interactionNotAllowed = true
+      let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: Self.biometricKeychainService,
+        kSecAttrAccount as String: Self.biometricKeychainAccount,
+        kSecUseAuthenticationContext as String: context,
+        kSecReturnAttributes as String: true
+      ]
+      let status = SecItemCopyMatching(query as CFDictionary, nil)
+      return status == errSecSuccess || status == errSecInteractionNotAllowed
+    }
+
+    Function("configureLockScreenSkipCommands") { (canPrev: Bool, canNext: Bool) in
+      DispatchQueue.main.async {
+        self.remoteCommandWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+          guard let self = self else { return }
+          let center = MPRemoteCommandCenter.shared()
+          center.nextTrackCommand.removeTarget(nil)
+          center.previousTrackCommand.removeTarget(nil)
+          self.nextTrackRemoteTarget = nil
+          self.prevTrackRemoteTarget = nil
+
+          center.skipForwardCommand.isEnabled = false
+          center.skipBackwardCommand.isEnabled = false
+
+          if canNext {
+            self.nextTrackRemoteTarget = center.nextTrackCommand.addTarget { [weak self] _ in
+              self?.sendEvent("onRemoteTrackCommand", ["direction": "next"])
+              return .success
+            }
+          }
+          if canPrev {
+            self.prevTrackRemoteTarget = center.previousTrackCommand.addTarget { [weak self] _ in
+              self?.sendEvent("onRemoteTrackCommand", ["direction": "previous"])
+              return .success
+            }
+          }
+
+          center.nextTrackCommand.isEnabled = canNext
+          center.previousTrackCommand.isEnabled = canPrev
+        }
+        self.remoteCommandWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+      }
+    }
+
+    Function("clearLockScreenSkipCommands") {
+      self.clearRemoteTrackTargetsSync()
     }
 
     View(MoodSyncGlassView.self) {
@@ -302,6 +564,7 @@ public class MoodSyncVisionModule: Module {
         "emotion": emotion,
         "emotionLabel": emotionLabelsTr[emotion] ?? "Dingin",
         "confidence": onnxRes.confidence,
+        "emotionScores": onnxRes.scores,
         "faceBox": faceBox,
         "engine": "affectnet-onnx-ondevice",
         "serverConnected": true
@@ -317,12 +580,20 @@ public class MoodSyncVisionModule: Module {
     )
     let features = detector?.features(in: orientedCI, options: [CIDetectorSmile: true]) as? [CIFaceFeature] ?? []
     let emotion = (features.first?.hasSmile ?? false) ? "happy" : "neutral"
+    let fallbackScores: [String: Double] = [
+      "happy": emotion == "happy" ? 0.78 : 0.055,
+      "surprise": 0.055,
+      "neutral": emotion == "neutral" ? 0.78 : 0.055,
+      "sad": 0.055,
+      "angry": 0.055
+    ]
     return [
       "detected": true,
       "mood": emotionToMood[emotion] ?? "neutral",
       "emotion": emotion,
       "emotionLabel": emotionLabelsTr[emotion] ?? "Dingin",
       "confidence": 0.78,
+      "emotionScores": fallbackScores,
       "faceBox": faceBox,
       "engine": "apple-vision",
       "serverConnected": true
@@ -336,10 +607,60 @@ public class MoodSyncVisionModule: Module {
       "emotion": NSNull(),
       "emotionLabel": NSNull(),
       "confidence": 0.0,
+      "emotionScores": NSNull(),
       "faceBox": NSNull(),
       "engine": engine,
       "serverConnected": true
     ]
+  }
+
+  // MARK: - Biometrics & Remote Audio Helpers
+
+  private func clearRemoteTrackTargetsSync() {
+    DispatchQueue.main.async {
+      self.remoteCommandWorkItem?.cancel()
+      self.remoteCommandWorkItem = nil
+      let center = MPRemoteCommandCenter.shared()
+      if let target = self.nextTrackRemoteTarget {
+        center.nextTrackCommand.removeTarget(target)
+        self.nextTrackRemoteTarget = nil
+      }
+      if let target = self.prevTrackRemoteTarget {
+        center.previousTrackCommand.removeTarget(target)
+        self.prevTrackRemoteTarget = nil
+      }
+      center.nextTrackCommand.isEnabled = false
+      center.previousTrackCommand.isEnabled = false
+    }
+  }
+
+  private static func isBiometricCancelled(_ error: NSError?) -> Bool {
+    guard let err = error else { return false }
+    return err.code == LAError.userCancel.rawValue ||
+      err.code == LAError.appCancel.rawValue ||
+      err.code == LAError.systemCancel.rawValue
+  }
+
+  private static func mapBiometricError(_ error: NSError?) -> String {
+    guard let err = error else {
+      return "Face ID doğrulaması tamamlanamadı."
+    }
+    switch err.code {
+    case LAError.userCancel.rawValue, LAError.appCancel.rawValue, LAError.systemCancel.rawValue:
+      return "Face ID doğrulaması iptal edildi."
+    case LAError.biometryNotAvailable.rawValue:
+      return "Bu cihazda Face ID veya biyometrik doğrulama kullanılamıyor."
+    case LAError.biometryNotEnrolled.rawValue:
+      return "iPhone Ayarlar üzerinden henüz Face ID tanımlanmamış."
+    case LAError.biometryLockout.rawValue:
+      return "Çok fazla başarısız deneme nedeniyle Face ID geçici olarak kilitlendi."
+    case LAError.authenticationFailed.rawValue:
+      return "Yüz tanıma eşleşmedi. Lütfen tekrar deneyin."
+    default:
+      return err.localizedDescription.isEmpty
+        ? "Face ID doğrulaması başarısız oldu."
+        : err.localizedDescription
+    }
   }
 
   // MARK: - AffectNet EfficientNet-B2 7-Emotion Inference
@@ -350,7 +671,7 @@ public class MoodSyncVisionModule: Module {
     orientedCI: CIImage,
     faceObservation: VNFaceObservation,
     isFinalCapture: Bool
-  ) -> (emotion: String, confidence: Double)? {
+  ) -> (emotion: String, confidence: Double, scores: [String: Double])? {
     let extent = orientedCI.extent
     guard extent.width > 0 && extent.height > 0 else {
       return nil
@@ -490,7 +811,7 @@ public class MoodSyncVisionModule: Module {
       }
     }
 
-    return (bestEmotion, bestProb)
+    return (bestEmotion, bestProb, emoScores)
   }
 
   private static func runOnnxLogits(

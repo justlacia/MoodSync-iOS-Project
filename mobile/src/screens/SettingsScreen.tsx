@@ -1,19 +1,34 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   Easing,
+  Image,
+  Modal,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import {
+  BiometricCapabilities,
+  getBiometricCapabilities,
+} from '../../modules/moodsync-vision';
+import {
+  BiometricBindingInfo,
   DashboardStats,
+  disableBiometricBinding,
+  enableBiometricBindingForUser,
+  getBiometricBinding,
   isAdminUser,
+  listDislikedTracks,
   TrackRecord,
+  undislikeTrack,
   UserRecord,
 } from '../database/iosDatabase';
 import { getAiEngineSummary } from '../services/moodAiService';
@@ -31,24 +46,26 @@ interface Props {
   stats: DashboardStats;
   storageInfo: { photoCount: number; trackCount: number; scanCount: number };
   adminMode: boolean;
-  visitTick: number;
+  isActiveTab: boolean;
   onSetAdminMode: (open: boolean) => void;
   onPlayTrack: (queue: TrackRecord[], index: number) => void;
   onDatabaseMutated: () => void;
+  onBiometricSettingsChanged?: () => void;
   onClearOwnHistory: () => Promise<void>;
   onWipeAllData: () => Promise<void>;
   onLogout: () => void;
 }
 
-export const SettingsScreen: React.FC<Props> = ({
+export const SettingsScreen: React.FC<Props> = React.memo(({
   user,
   stats,
   storageInfo,
   adminMode,
-  visitTick,
+  isActiveTab,
   onSetAdminMode,
   onPlayTrack,
   onDatabaseMutated,
+  onBiometricSettingsChanged,
   onClearOwnHistory,
   onWipeAllData,
   onLogout,
@@ -59,22 +76,109 @@ export const SettingsScreen: React.FC<Props> = ({
   const showAdmin = isAdmin && adminMode;
   const engineInfo = getAiEngineSummary();
 
+  const [bioCaps, setBioCaps] = useState<BiometricCapabilities>(() => getBiometricCapabilities());
+  const [bioBinding, setBioBinding] = useState<BiometricBindingInfo | null>(null);
+  const [bioBusy, setBioBusy] = useState(false);
+  const [dislikedTracks, setDislikedTracks] = useState<TrackRecord[]>([]);
+  const [dislikedModalOpen, setDislikedModalOpen] = useState(false);
+
+  const loadSecurityAndDisliked = useCallback(async () => {
+    setBioCaps(getBiometricCapabilities());
+    const [binding, disliked] = await Promise.all([
+      getBiometricBinding(),
+      listDislikedTracks(user.id),
+    ]);
+    setBioBinding(binding);
+    setDislikedTracks(disliked);
+  }, [user.id]);
+
+  useEffect(() => {
+    if (isActiveTab) {
+      loadSecurityAndDisliked().catch(() => {});
+    }
+  }, [isActiveTab, loadSecurityAndDisliked]);
+
+  const handleLinkBiometric = async () => {
+    if (bioBusy) return;
+    setBioBusy(true);
+    try {
+      const res = await enableBiometricBindingForUser(user, {
+        appLockEnabled: false,
+        adminLockEnabled: false,
+      });
+      if (res.ok && res.binding) {
+        setBioBinding(res.binding);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        onBiometricSettingsChanged?.();
+      } else if (!res.cancelled && res.error) {
+        Alert.alert('Face ID Eşleştirilemedi', res.error);
+      }
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleUnlinkBiometric = () => {
+    Alert.alert(
+      `${bioCaps.label} Eşleştirmesini Kaldır`,
+      `@${bioBinding?.username || user.username} hesabı için hızlı ${bioCaps.label} girişi kapatılacak. Devam edilsin mi?`,
+      [
+        { text: 'Vazgeç', style: 'cancel' },
+        {
+          text: 'Kaldır',
+          style: 'destructive',
+          onPress: async () => {
+            await disableBiometricBinding();
+            setBioBinding(null);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+            onBiometricSettingsChanged?.();
+          },
+        },
+      ]
+    );
+  };
+
+  const handleRestoreDisliked = async (trackId: number) => {
+    await undislikeTrack(user.id, trackId);
+    setDislikedTracks((prev) => prev.filter((t) => t.id !== trackId));
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    onDatabaseMutated();
+  };
+
   const slideX = useRef(new Animated.Value(0)).current;
   const viewOpacity = useRef(new Animated.Value(1)).current;
   const prevShowAdmin = useRef(showAdmin);
+  const prevActiveTabRef = useRef(isActiveTab);
+  const adminAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  const returningFromAdmin =
+    prevShowAdmin.current && !showAdmin && prevActiveTabRef.current && isActiveTab;
+  const enteringAdminFromTab =
+    !prevShowAdmin.current && showAdmin && prevActiveTabRef.current && isActiveTab;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const wasActiveTab = prevActiveTabRef.current;
+    prevActiveTabRef.current = isActiveTab;
+
     if (prevShowAdmin.current === showAdmin) return;
     const enteringAdmin = showAdmin;
     prevShowAdmin.current = showAdmin;
 
-    slideX.setValue(enteringAdmin ? 34 : -34);
-    viewOpacity.setValue(0);
+    adminAnimRef.current?.stop();
 
-    Animated.parallel([
+    if (!wasActiveTab || !isActiveTab) {
+      slideX.setValue(0);
+      viewOpacity.setValue(1);
+      adminAnimRef.current = null;
+      return;
+    }
+
+    slideX.setValue(enteringAdmin ? 28 : -28);
+    viewOpacity.setValue(0.35);
+
+    const anim = Animated.parallel([
       Animated.timing(viewOpacity, {
         toValue: 1,
-        duration: 240,
+        duration: 210,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
@@ -85,8 +189,20 @@ export const SettingsScreen: React.FC<Props> = ({
         mass: 0.8,
         useNativeDriver: true,
       }),
-    ]).start();
-  }, [showAdmin, slideX, viewOpacity]);
+    ]);
+    adminAnimRef.current = anim;
+    anim.start(({ finished }) => {
+      if (finished && adminAnimRef.current === anim) {
+        adminAnimRef.current = null;
+      }
+    });
+  }, [isActiveTab, showAdmin, slideX, viewOpacity]);
+
+  useEffect(() => {
+    return () => {
+      adminAnimRef.current?.stop();
+    };
+  }, []);
 
   if (showAdmin) {
     return (
@@ -99,6 +215,8 @@ export const SettingsScreen: React.FC<Props> = ({
       >
         <AdminPanelScreen
           currentUser={user}
+          isActiveTab={isActiveTab}
+          skipInitialEntrance={enteringAdminFromTab}
           onBack={() => onSetAdminMode(false)}
           onPlayTrack={onPlayTrack}
           onDatabaseMutated={onDatabaseMutated}
@@ -122,7 +240,12 @@ export const SettingsScreen: React.FC<Props> = ({
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
-        <StaggeredEntry index={0} animationKey={visitTick} style={styles.headerBlock}>
+        <StaggeredEntry
+          index={0}
+          active={isActiveTab}
+          enabled={!returningFromAdmin}
+          style={styles.headerBlock}
+        >
           <Text style={styles.pageTitle}>Ayarlar</Text>
           <Text style={styles.pageSub}>
             Profilin, tema tercihin, yapay zeka gizlilik ayarların ve hesap yönetimi.
@@ -130,7 +253,12 @@ export const SettingsScreen: React.FC<Props> = ({
         </StaggeredEntry>
 
         {/* 1. Profile Card */}
-        <StaggeredEntry index={1} animationKey={visitTick} style={styles.card}>
+        <StaggeredEntry
+          index={1}
+          active={isActiveTab}
+          enabled={!returningFromAdmin}
+          style={styles.card}
+        >
           <View style={styles.profileTop}>
             <View style={[styles.avatarCircle, isAdmin && styles.avatarCircleAdmin]}>
               <Text style={[styles.avatarText, isAdmin && { color: '#FFFFFF' }]}>
@@ -180,7 +308,7 @@ export const SettingsScreen: React.FC<Props> = ({
 
         {/* 2. Admin Panel Entry (Strictly Admin Only) */}
         {isAdmin && (
-          <StaggeredEntry index={2} animationKey={visitTick}>
+          <StaggeredEntry index={2} active={isActiveTab} enabled={!returningFromAdmin}>
             <SpringPressable
               haptic
               scaleTo={0.97}
@@ -204,8 +332,112 @@ export const SettingsScreen: React.FC<Props> = ({
           </StaggeredEntry>
         )}
 
-        {/* 3. Theme Selection */}
-        <StaggeredEntry index={isAdmin ? 3 : 2} animationKey={visitTick} style={styles.card}>
+        {/* 3. Account-Bound Face ID & Security */}
+        <StaggeredEntry
+          index={isAdmin ? 3 : 2}
+          active={isActiveTab}
+          enabled={!returningFromAdmin}
+          style={styles.card}
+        >
+          <View style={styles.aiHeaderRow}>
+            <Text style={styles.sectionMiniTitle}>GÜVENLİK &amp; {bioCaps.label.toUpperCase()}</Text>
+            {bioBinding && bioBinding.userId === user.id && (
+              <View style={styles.privacyBadge}>
+                <Ionicons name="shield-checkmark" size={11} color={colors.moodNeutral} />
+                <Text style={styles.privacyBadgeText}>Hesaba Bağlı</Text>
+              </View>
+            )}
+          </View>
+
+          {!bioCaps.available ? (
+            <View style={styles.infoRowBox}>
+              <Text style={styles.infoLabel}>{bioCaps.label} Kullanılamıyor</Text>
+              <Text style={styles.bioSubtleText}>
+                Cihazda Face ID ayarlanmamış veya devre dışı. iPhone Ayarlar üzerinden Face ID’yi etkinleştirip tekrar deneyebilirsin.
+              </Text>
+            </View>
+          ) : !bioBinding ? (
+            <View style={{ gap: 10 }}>
+              <Text style={styles.cardSub}>
+                {bioCaps.label} yalnızca @{user.username} hesabıyla eşleştirilir. Başka hesaplar Face ID ile açılamaz ve telefona yeni yüz eklenirse güvenlik nedeniyle sıfırlanır.
+              </Text>
+              <SpringPressable
+                haptic
+                disabled={bioBusy}
+                onPress={handleLinkBiometric}
+                style={[styles.bioEnrollBtn, bioBusy && { opacity: 0.65 }]}
+              >
+                {bioBusy ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <>
+                    <Ionicons name="scan-outline" size={18} color="#FFFFFF" />
+                    <Text style={styles.bioEnrollBtnText}>
+                      {bioCaps.label}’yi @{user.username} Hesabıyla Eşleştir
+                    </Text>
+                  </>
+                )}
+              </SpringPressable>
+            </View>
+          ) : bioBinding.userId === user.id ? (
+            <View style={{ gap: 10 }}>
+              <Text style={styles.bioSubtleText}>
+                Bu cihazdaki {bioCaps.label}, giriş ekranında şifre girmeden doğrudan @{user.username} hesabına giriş yapmak için iOS Keychain (.biometryCurrentSet) ile eşleştirildi. Uygulama kilidi uygulanmaz.
+              </Text>
+
+              <SpringPressable
+                haptic
+                onPress={handleUnlinkBiometric}
+                style={styles.bioUnlinkBtn}
+              >
+                <Ionicons name="unlink-outline" size={16} color={colors.danger} />
+                <Text style={styles.bioUnlinkText}>
+                  {bioCaps.label} Eşleştirmesini Kaldır
+                </Text>
+              </SpringPressable>
+            </View>
+          ) : (
+            <View style={{ gap: 10 }}>
+              <View style={styles.infoRowBox}>
+                <Text style={styles.infoLabel}>Başka Hesaba Eşleştirilmiş</Text>
+                <Text style={styles.bioSubtleText}>
+                  Bu cihazdaki {bioCaps.label} yalnızca @{bioBinding.username} (
+                  {bioBinding.role === 'admin' ? 'Admin' : 'Standart'}) hesabıyla eşleştirilmiş durumda.
+                </Text>
+              </View>
+              {isAdmin && (
+                <SpringPressable
+                  haptic
+                  disabled={bioBusy}
+                  onPress={() => {
+                    Alert.alert(
+                      `${bioCaps.label} Eşleştirmesini Devral`,
+                      `Mevcut @${bioBinding.username} eşleştirmesi kaldırılıp ${bioCaps.label} sadece Admin (@${user.username}) hesabına bağlansın mı?`,
+                      [
+                        { text: 'Vazgeç', style: 'cancel' },
+                        { text: 'Devral', onPress: handleLinkBiometric },
+                      ]
+                    );
+                  }}
+                  style={styles.secondaryActionBtn}
+                >
+                  <Ionicons name="shield-checkmark-outline" size={17} color={colors.brand} />
+                  <Text style={[styles.secondaryActionText, { color: colors.brand }]}>
+                    {bioCaps.label}’yi Admin Hesabıma Bağla
+                  </Text>
+                </SpringPressable>
+              )}
+            </View>
+          )}
+        </StaggeredEntry>
+
+        {/* 4. Theme Selection */}
+        <StaggeredEntry
+          index={isAdmin ? 4 : 3}
+          active={isActiveTab}
+          enabled={!returningFromAdmin}
+          style={styles.card}
+        >
           <Text style={styles.sectionMiniTitle}>GÖRÜNÜM &amp; TEMA SEÇİMİ</Text>
           <Text style={styles.cardSub}>
             iPhone 16 Pro OLED ekranına özel simsiyah ve koyu temalardan birini seçebilirsin.
@@ -247,8 +479,13 @@ export const SettingsScreen: React.FC<Props> = ({
           </View>
         </StaggeredEntry>
 
-        {/* 4. AI Engine & Device Info */}
-        <StaggeredEntry index={isAdmin ? 4 : 3} animationKey={visitTick} style={styles.card}>
+        {/* 5. AI Engine & Device Info */}
+        <StaggeredEntry
+          index={isAdmin ? 5 : 4}
+          active={isActiveTab}
+          enabled={!returningFromAdmin}
+          style={styles.card}
+        >
           <View style={styles.aiHeaderRow}>
             <Text style={styles.sectionMiniTitle}>YAPAY ZEKA &amp; CİHAZ BİLGİSİ</Text>
             <View style={styles.privacyBadge}>
@@ -274,11 +511,30 @@ export const SettingsScreen: React.FC<Props> = ({
           </View>
         </StaggeredEntry>
 
-        {/* 5. Account & Data Actions */}
-        <StaggeredEntry index={isAdmin ? 5 : 4} animationKey={visitTick} style={styles.card}>
+        {/* 6. Account & Data Actions */}
+        <StaggeredEntry
+          index={isAdmin ? 6 : 5}
+          active={isActiveTab}
+          enabled={!returningFromAdmin}
+          style={styles.card}
+        >
           <Text style={styles.sectionMiniTitle}>HESAP &amp; VERİ YÖNETİMİ</Text>
 
           <View style={styles.actionsCol}>
+            <SpringPressable
+              haptic
+              onPress={() => {
+                loadSecurityAndDisliked().catch(() => {});
+                setDislikedModalOpen(true);
+              }}
+              style={styles.secondaryActionBtn}
+            >
+              <Ionicons name="eye-off-outline" size={18} color={colors.inkPrimary} />
+              <Text style={styles.secondaryActionText}>
+                Gizlenen Şarkılar ({dislikedTracks.length})
+              </Text>
+            </SpringPressable>
+
             <SpringPressable
               haptic
               onPress={() => {
@@ -337,9 +593,75 @@ export const SettingsScreen: React.FC<Props> = ({
           </View>
         </StaggeredEntry>
       </ScrollView>
+
+      {/* Disliked / Hidden Tracks Management Modal */}
+      <Modal
+        visible={dislikedModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setDislikedModalOpen(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setDislikedModalOpen(false)} />
+          <SafeAreaView edges={['bottom']} style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Gizlenen Şarkılar</Text>
+                <Text style={styles.modalSub}>
+                  “Bir Daha Önerme” dediğiniz şarkılar burada tutulur. İstediğinizi geri alabilirsiniz.
+                </Text>
+              </View>
+              <SpringPressable
+                haptic
+                onPress={() => setDislikedModalOpen(false)}
+                style={styles.modalCloseBtn}
+              >
+                <Ionicons name="close" size={18} color={colors.inkSecondary} />
+              </SpringPressable>
+            </View>
+
+            {dislikedTracks.length === 0 ? (
+              <View style={styles.modalEmpty}>
+                <Ionicons name="musical-notes-outline" size={28} color={colors.inkMuted} />
+                <Text style={styles.modalEmptyText}>Henüz gizlediğiniz bir şarkı yok.</Text>
+              </View>
+            ) : (
+              <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ gap: 8 }}>
+                {dislikedTracks.map((tr) => (
+                  <View key={tr.id} style={styles.dislikedRow}>
+                    {tr.artworkUrl ? (
+                      <Image source={{ uri: tr.artworkUrl }} style={styles.dislikedCover} />
+                    ) : (
+                      <View style={[styles.dislikedCover, { alignItems: 'center', justifyContent: 'center' }]}>
+                        <Ionicons name="musical-notes" size={16} color={colors.brand} />
+                      </View>
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text numberOfLines={1} style={styles.dislikedTitle}>
+                        {tr.title}
+                      </Text>
+                      <Text numberOfLines={1} style={styles.dislikedArtist}>
+                        {tr.artist}
+                      </Text>
+                    </View>
+                    <SpringPressable
+                      haptic
+                      onPress={() => handleRestoreDisliked(tr.id)}
+                      style={styles.restoreBtn}
+                    >
+                      <Text style={styles.restoreBtnText}>Geri Al</Text>
+                    </SpringPressable>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+          </SafeAreaView>
+        </View>
+      </Modal>
     </Animated.View>
   );
-};
+});
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
@@ -643,5 +965,156 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 14,
       fontWeight: '800',
       color: '#FFFFFF',
+    },
+    bioSubtleText: {
+      marginTop: 4,
+      fontSize: 12.5,
+      color: colors.inkSecondary,
+      lineHeight: 18,
+    },
+    bioEnrollBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      backgroundColor: colors.brand,
+      paddingVertical: 13,
+      borderRadius: 13,
+    },
+    bioEnrollBtnText: {
+      fontSize: 13.5,
+      fontWeight: '800',
+      color: '#FFFFFF',
+    },
+    switchRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      backgroundColor: colors.elevated,
+      borderRadius: 14,
+      paddingHorizontal: 13,
+      paddingVertical: 11,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+    },
+    switchTitle: {
+      fontSize: 13.5,
+      fontWeight: '700',
+      color: colors.inkPrimary,
+    },
+    switchDesc: {
+      marginTop: 2,
+      fontSize: 11.5,
+      color: colors.inkSecondary,
+      lineHeight: 16,
+    },
+    bioUnlinkBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      backgroundColor: colors.dangerSoft,
+      paddingVertical: 11,
+      borderRadius: 12,
+    },
+    bioUnlinkText: {
+      fontSize: 13,
+      fontWeight: '800',
+      color: colors.danger,
+    },
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.62)',
+      justifyContent: 'flex-end',
+    },
+    modalSheet: {
+      maxHeight: '78%',
+      backgroundColor: colors.surface,
+      borderTopLeftRadius: 26,
+      borderTopRightRadius: 26,
+      paddingHorizontal: 18,
+      paddingTop: 10,
+      paddingBottom: 14,
+      borderTopWidth: 1,
+      borderColor: colors.hairlineStrong,
+    },
+    modalHandle: {
+      alignSelf: 'center',
+      width: 38,
+      height: 4.5,
+      borderRadius: 999,
+      backgroundColor: colors.hairlineStrong,
+      marginBottom: 12,
+    },
+    modalHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      marginBottom: 14,
+    },
+    modalTitle: {
+      fontSize: 18,
+      fontWeight: '800',
+      color: colors.inkPrimary,
+    },
+    modalSub: {
+      marginTop: 2,
+      fontSize: 12,
+      color: colors.inkSecondary,
+      lineHeight: 17,
+    },
+    modalCloseBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      backgroundColor: colors.elevated,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    modalEmpty: {
+      alignItems: 'center',
+      paddingVertical: 28,
+      gap: 8,
+    },
+    modalEmptyText: {
+      fontSize: 13,
+      color: colors.inkSecondary,
+    },
+    dislikedRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      backgroundColor: colors.elevated,
+      borderRadius: 14,
+      padding: 10,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+    },
+    dislikedCover: {
+      width: 42,
+      height: 42,
+      borderRadius: 10,
+      backgroundColor: colors.subtle,
+    },
+    dislikedTitle: {
+      fontSize: 13.5,
+      fontWeight: '700',
+      color: colors.inkPrimary,
+    },
+    dislikedArtist: {
+      marginTop: 1,
+      fontSize: 12,
+      color: colors.inkSecondary,
+    },
+    restoreBtn: {
+      backgroundColor: colors.brandSoft,
+      paddingHorizontal: 11,
+      paddingVertical: 7,
+      borderRadius: 10,
+    },
+    restoreBtnText: {
+      fontSize: 12,
+      fontWeight: '800',
+      color: colors.brand,
     },
   });

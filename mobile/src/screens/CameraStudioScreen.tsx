@@ -13,16 +13,19 @@ import {
   Image,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { EmotionBreakdownCard } from '../components/EmotionBreakdownCard';
 import {
   AnimatedSegmentedControl,
   PulseDot,
   SpringPressable,
   StaggeredEntry,
 } from '../components/MotionPrimitives';
+import { ScanJournalCard } from '../components/ScanJournalCard';
 import { TrackRow } from '../components/TrackRow';
 import {
   captureAndSaveSessionOnServer,
@@ -33,6 +36,7 @@ import { analyzeCameraFrame } from '../services/moodAiService';
 import {
   emotionToMood,
   EmotionType,
+  MoodStrategy,
   MoodType,
   resolveMoodVisual,
   ThemePalette,
@@ -59,7 +63,6 @@ interface Props {
   userId: number;
   userFirstName: string;
   isActiveTab: boolean;
-  visitTick?: number;
   launchCameraTick?: number;
   activeSession: ScanSessionRecord | null;
   recentScans: ScanSessionRecord[];
@@ -70,6 +73,16 @@ interface Props {
   onSeeAllHistory: () => void;
   onPlayTrack: (queue: TrackRecord[], index: number) => void;
   onToggleFavorite: (trackId: number) => void;
+  onTrackMorePress: (track: TrackRecord) => void;
+  onUpdateSessionMoodOrStrategy: (params: {
+    sessionId: number;
+    emotion?: EmotionType;
+    strategy?: MoodStrategy;
+    language?: 'all' | 'tr' | 'global';
+    isManualOverride?: boolean;
+  }) => Promise<void>;
+  onUpdateSessionJournal: (sessionId: number, note: string, tags: string[]) => Promise<void>;
+  onSaveTracksToPlaylist: (tracks: TrackRecord[], suggestedName: string) => void;
   onExpandSessionTracks: (
     sessionId: number,
     addCount: number,
@@ -80,11 +93,10 @@ interface Props {
 
 const EXPAND_PRESETS = [5, 10, 15] as const;
 
-export const CameraStudioScreen: React.FC<Props> = ({
+export const CameraStudioScreen: React.FC<Props> = React.memo(({
   userId,
   userFirstName,
   isActiveTab,
-  visitTick = 0,
   launchCameraTick = 0,
   activeSession,
   recentScans,
@@ -95,6 +107,10 @@ export const CameraStudioScreen: React.FC<Props> = ({
   onSeeAllHistory,
   onPlayTrack,
   onToggleFavorite,
+  onTrackMorePress,
+  onUpdateSessionMoodOrStrategy,
+  onUpdateSessionJournal,
+  onSaveTracksToPlaylist,
   onExpandSessionTracks,
   onCatalogExpanded,
 }) => {
@@ -107,10 +123,12 @@ export const CameraStudioScreen: React.FC<Props> = ({
   const [autoPausedNotice, setAutoPausedNotice] = useState(false);
   const [facing, setFacing] = useState<CameraType>('front');
   const [capturing, setCapturing] = useState(false);
+  const [updatingMood, setUpdatingMood] = useState(false);
   const [expandingCount, setExpandingCount] = useState<number | null>(null);
   const [expandNotice, setExpandNotice] = useState<string | null>(null);
   const [newlyAddedStartIndex, setNewlyAddedStartIndex] = useState<number | null>(null);
   const [langFilter, setLangFilter] = useState<'all' | 'tr' | 'global'>('all');
+  const [langFilterAnimTick, setLangFilterAnimTick] = useState(0);
 
   // Top-right live mood & fine-grained emotion state
   const [liveMood, setLiveMood] = useState<MoodType | null>(null);
@@ -132,6 +150,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
   const capturingRef = useRef(false);
   const lastLaunchTickRef = useRef<number>(launchCameraTick || 0);
   const pendingExpandRef = useRef<{ sessionId: number; prevVisibleCount: number } | null>(null);
+  const animateNextSessionIdRef = useRef<number | null>(null);
   const expandToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const historyVotesRef = useRef<Array<{ emotion: EmotionType; mood: MoodType; conf: number }>>([]);
   const lastLockRef = useRef<{
@@ -161,7 +180,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
   // Smooth pulse on live mood HUD whenever detected emotion changes
   useEffect(() => {
     if (!liveEmotion) return;
-    Animated.sequence([
+    const anim = Animated.sequence([
       Animated.timing(hudScale, {
         toValue: 1.06,
         duration: 130,
@@ -174,16 +193,19 @@ export const CameraStudioScreen: React.FC<Props> = ({
         stiffness: 200,
         useNativeDriver: true,
       }),
-    ]).start();
+    ]);
+    anim.start();
+    return () => anim.stop();
   }, [hudScale, liveEmotion]);
 
   // Smooth downward slide-in when a new photo scan session appears
   useEffect(() => {
-    if (!activeSession?.id) return;
+    if (!activeSession?.id || animateNextSessionIdRef.current !== activeSession.id) return;
+    animateNextSessionIdRef.current = null;
     playlistOpacity.setValue(0);
     playlistTranslateY.setValue(-34);
     playlistScale.setValue(0.95);
-    Animated.parallel([
+    const anim = Animated.parallel([
       Animated.timing(playlistOpacity, {
         toValue: 1,
         duration: 380,
@@ -203,7 +225,9 @@ export const CameraStudioScreen: React.FC<Props> = ({
         stiffness: 160,
         useNativeDriver: true,
       }),
-    ]).start();
+    ]);
+    anim.start();
+    return () => anim.stop();
   }, [activeSession?.id, playlistOpacity, playlistScale, playlistTranslateY]);
 
   // Live mood detection loop on iPhone 16 Pro camera stream
@@ -345,12 +369,14 @@ export const CameraStudioScreen: React.FC<Props> = ({
       return;
     }
     cameraAppear.setValue(0);
-    Animated.timing(cameraAppear, {
+    const anim = Animated.timing(cameraAppear, {
       toValue: 1,
       duration: 240,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
-    }).start();
+    });
+    anim.start();
+    return () => anim.stop();
   }, [cameraAppear, cameraOpen]);
 
   // Auto-close camera when switching away from Camera tab
@@ -392,6 +418,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
   useEffect(() => {
     setExpandNotice(null);
     setNewlyAddedStartIndex(null);
+    setLangFilterAnimTick(0);
     pendingExpandRef.current = null;
   }, [activeSession?.id]);
 
@@ -514,6 +541,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
 
       setAiConnected(true);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      animateNextSessionIdRef.current = newSession.id;
       onSessionCreated(newSession);
       onCatalogExpanded();
 
@@ -559,6 +587,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
         language: langFilter,
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      animateNextSessionIdRef.current = newSession.id;
       onSessionCreated(newSession);
       onCatalogExpanded();
       setTimeout(() => {
@@ -637,7 +666,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
       showsVerticalScrollIndicator={false}
     >
       {/* Greeting Header */}
-      <StaggeredEntry index={0} animationKey={visitTick} style={styles.greetingBlock}>
+      <StaggeredEntry index={0} active={isActiveTab} style={styles.greetingBlock}>
         <Text
           numberOfLines={1}
           adjustsFontSizeToFit
@@ -652,7 +681,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
       </StaggeredEntry>
 
       {/* ON-DEMAND CAMERA CARD */}
-      <StaggeredEntry index={1} animationKey={visitTick} style={styles.cameraCard}>
+      <StaggeredEntry index={1} active={isActiveTab} style={styles.cameraCard}>
         {permission?.granted && cameraOpen ? (
           <>
             <Animated.View style={[styles.viewport, { opacity: cameraAppear }]}>
@@ -855,147 +884,243 @@ export const CameraStudioScreen: React.FC<Props> = ({
       {activeSession && (() => {
         const activeMeta = resolveMoodVisual(activeSession.mood, activeSession.emotion, colors);
         const mirrored = isFrontCameraSession(activeSession.deviceLabel);
+        const handleStrategyChange = async (nextStrategy: MoodStrategy) => {
+          if (updatingMood) return;
+          setUpdatingMood(true);
+          try {
+            await onUpdateSessionMoodOrStrategy({
+              sessionId: activeSession.id,
+              strategy: nextStrategy,
+              language: langFilter,
+            });
+          } finally {
+            setUpdatingMood(false);
+          }
+        };
+        const handleEmotionOverride = async (nextEmotion: EmotionType) => {
+          if (updatingMood) return;
+          setUpdatingMood(true);
+          try {
+            await onUpdateSessionMoodOrStrategy({
+              sessionId: activeSession.id,
+              emotion: nextEmotion,
+              language: langFilter,
+              isManualOverride: true,
+            });
+          } finally {
+            setUpdatingMood(false);
+          }
+        };
+        const handleShareSession = async () => {
+          Haptics.selectionAsync().catch(() => {});
+          const list = visibleTracks.length > 0 ? visibleTracks : activeSession.tracks || [];
+          const lines = list.slice(0, 12).map((t, i) => `${i + 1}. ${t.title} — ${t.artist}`);
+          try {
+            await Share.share({
+              message: `🎧 MoodSync (${activeMeta.fullTr})\n\n${lines.join('\n')}`,
+            });
+          } catch {
+            // Cancelled
+          }
+        };
         return (
-          <Animated.View
-            style={[
-              styles.playlistCard,
-              {
-                opacity: playlistOpacity,
-                transform: [{ translateY: playlistTranslateY }, { scale: playlistScale }],
-              },
-            ]}
-          >
-            <View style={styles.sessionBanner}>
-              {activeSession.snapshotUri ? (
-                <Image
-                  source={{ uri: activeSession.snapshotUri }}
-                  style={[styles.snapThumb, mirrored && styles.mirroredImage]}
+          <StaggeredEntry index={2} active={isActiveTab}>
+            <Animated.View
+              style={[
+                styles.playlistCard,
+                {
+                  opacity: playlistOpacity,
+                  transform: [{ translateY: playlistTranslateY }, { scale: playlistScale }],
+                },
+              ]}
+            >
+              <View style={styles.sessionBanner}>
+                {activeSession.snapshotUri ? (
+                  <Image
+                    source={{ uri: activeSession.snapshotUri }}
+                    style={[styles.snapThumb, mirrored && styles.mirroredImage]}
+                  />
+                ) : (
+                  <View style={[styles.snapThumb, styles.snapFallback]}>
+                    <Ionicons name="sparkles" size={22} color={activeMeta.color} />
+                  </View>
+                )}
+
+                <View style={{ flex: 1 }}>
+                  <View style={styles.badgeLine}>
+                    <View
+                      style={[
+                        styles.moodPill,
+                        { backgroundColor: activeMeta.softColor },
+                      ]}
+                    >
+                      <Text style={[styles.moodPillText, { color: activeMeta.color }]}>
+                        {activeMeta.fullTr}
+                      </Text>
+                    </View>
+                    <Text style={styles.confText}>%{Math.round(activeSession.confidence * 100)} güven</Text>
+                  </View>
+                  <Text style={styles.playlistHeading}>Moduna Uygun Şarkı Listesi</Text>
+                  <Text style={styles.sessionMetaText}>
+                    {formatTimeTR(activeSession.createdAt)} · {activeSession.deviceLabel}
+                  </Text>
+                </View>
+              </View>
+
+              <EmotionBreakdownCard
+                mood={activeSession.mood}
+                emotion={activeSession.emotion}
+                emotionScores={activeSession.emotionScores}
+                strategy={activeSession.moodStrategy || 'match'}
+                isManualOverride={activeSession.isManualOverride}
+                updating={updatingMood}
+                onChangeStrategy={handleStrategyChange}
+                onChangeEmotion={handleEmotionOverride}
+              />
+
+              <View style={styles.sessionQuickActions}>
+                <SpringPressable
+                  haptic
+                  onPress={() =>
+                    onSaveTracksToPlaylist(
+                      visibleTracks.length > 0 ? visibleTracks : activeSession.tracks || [],
+                      `${activeMeta.shortTr} Modum`
+                    )
+                  }
+                  style={styles.sessionActionPrimary}
+                >
+                  <Ionicons name="albums-outline" size={14} color={colors.brand} />
+                  <Text style={styles.sessionActionPrimaryText}>Çalma Listesi Yap</Text>
+                </SpringPressable>
+
+                <SpringPressable
+                  haptic
+                  onPress={handleShareSession}
+                  style={styles.sessionActionSecondary}
+                >
+                  <Ionicons name="share-outline" size={14} color={colors.inkPrimary} />
+                  <Text style={styles.sessionActionSecondaryText}>Paylaş</Text>
+                </SpringPressable>
+              </View>
+
+              <ScanJournalCard
+                compact
+                initialNote={activeSession.note || ''}
+                initialTags={activeSession.tags || []}
+                onSave={(note, tags) => onUpdateSessionJournal(activeSession.id, note, tags)}
+              />
+
+              <View style={styles.filterToolbar}>
+                <AnimatedSegmentedControl<'all' | 'tr' | 'global'>
+                  compact
+                  value={langFilter}
+                  onChange={(next) => {
+                    setLangFilter(next);
+                    setLangFilterAnimTick((t) => t + 1);
+                  }}
+                  options={[
+                    { key: 'all', label: 'Tümü' },
+                    { key: 'tr', label: 'Türkçe' },
+                    { key: 'global', label: 'Yabancı' },
+                  ]}
+                  style={{ flex: 1 }}
                 />
-              ) : (
-                <View style={[styles.snapThumb, styles.snapFallback]}>
-                  <Ionicons name="sparkles" size={22} color={activeMeta.color} />
+
+                <SpringPressable
+                  haptic
+                  onPress={() => handleExpandActivePlaylist(8)}
+                  disabled={expandingCount !== null}
+                  style={styles.refreshOnlineBtn}
+                >
+                  {expandingCount !== null ? (
+                    <ActivityIndicator size="small" color={colors.brand} />
+                  ) : (
+                    <Ionicons name="add-circle-outline" size={15} color={colors.brand} />
+                  )}
+                  <Text style={styles.refreshOnlineText}>
+                    {expandingCount !== null ? 'Ekleniyor…' : '+8 Ekle'}
+                  </Text>
+                </SpringPressable>
+              </View>
+
+              {expandNotice && (
+                <View style={styles.expandToast}>
+                  <Ionicons name="sparkles" size={14} color={colors.brand} />
+                  <Text style={styles.expandToastText}>{expandNotice}</Text>
                 </View>
               )}
 
-              <View style={{ flex: 1 }}>
-                <View style={styles.badgeLine}>
-                  <View
-                    style={[
-                      styles.moodPill,
-                      { backgroundColor: activeMeta.softColor },
-                    ]}
-                  >
-                    <Text style={[styles.moodPillText, { color: activeMeta.color }]}>
-                      {activeMeta.fullTr}
-                    </Text>
-                  </View>
-                  <Text style={styles.confText}>%{Math.round(activeSession.confidence * 100)} güven</Text>
-                </View>
-                <Text style={styles.playlistHeading}>Moduna Uygun Şarkı Listesi</Text>
-                <Text style={styles.sessionMetaText}>
-                  {formatTimeTR(activeSession.createdAt)} · {activeSession.deviceLabel}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.filterToolbar}>
-              <AnimatedSegmentedControl<'all' | 'tr' | 'global'>
-                compact
-                value={langFilter}
-                onChange={setLangFilter}
-                options={[
-                  { key: 'all', label: 'Tümü' },
-                  { key: 'tr', label: 'Türkçe' },
-                  { key: 'global', label: 'Yabancı' },
-                ]}
-                style={{ flex: 1 }}
-              />
-
-              <SpringPressable
-                haptic
-                onPress={() => handleExpandActivePlaylist(8)}
-                disabled={expandingCount !== null}
-                style={styles.refreshOnlineBtn}
-              >
-                {expandingCount !== null ? (
-                  <ActivityIndicator size="small" color={colors.brand} />
-                ) : (
-                  <Ionicons name="add-circle-outline" size={15} color={colors.brand} />
-                )}
-                <Text style={styles.refreshOnlineText}>
-                  {expandingCount !== null ? 'Ekleniyor…' : '+8 Ekle'}
-                </Text>
-              </SpringPressable>
-            </View>
-
-            {expandNotice && (
-              <View style={styles.expandToast}>
-                <Ionicons name="sparkles" size={14} color={colors.brand} />
-                <Text style={styles.expandToastText}>{expandNotice}</Text>
-              </View>
-            )}
-
-            {visibleTracks.map((tr, idx) => (
-              <TrackRow
-                key={`${activeSession.id}-${tr.id}`}
-                track={tr}
-                index={idx}
-                staggerIndex={
+              {visibleTracks.map((tr, idx) => {
+                const rowAnimKey =
                   newlyAddedStartIndex !== null && idx >= newlyAddedStartIndex
-                    ? idx - newlyAddedStartIndex
-                    : idx
-                }
-                animationKey={`${activeSession.id}-${langFilter}`}
-                isActiveTrack={playingTrackId === tr.id}
-                isPlaying={playingTrackId === tr.id && isAudioPlaying}
-                onPlayPress={() => onPlayTrack(visibleTracks, idx)}
-                onToggleFavorite={() => onToggleFavorite(tr.id)}
-              />
-            ))}
+                    ? `exp-${activeSession.id}-${newlyAddedStartIndex}`
+                    : langFilterAnimTick > 0
+                      ? `flt-${activeSession.id}-${langFilterAnimTick}`
+                      : undefined;
+                return (
+                  <TrackRow
+                    key={`${activeSession.id}-${tr.id}`}
+                    track={tr}
+                    index={idx}
+                    staggerIndex={
+                      newlyAddedStartIndex !== null && idx >= newlyAddedStartIndex
+                        ? idx - newlyAddedStartIndex
+                        : idx
+                    }
+                    animationKey={rowAnimKey}
+                    isActiveTrack={playingTrackId === tr.id}
+                    isPlaying={playingTrackId === tr.id && isAudioPlaying}
+                    onPlayPress={() => onPlayTrack(visibleTracks, idx)}
+                    onToggleFavorite={() => onToggleFavorite(tr.id)}
+                    onMorePress={() => onTrackMorePress(tr)}
+                  />
+                );
+              })}
 
-            <View style={styles.expandFooter}>
-              <Text style={styles.expandFooterLabel}>Şarkı Sayısını Artır</Text>
-              <View style={styles.expandPresetRow}>
-                {EXPAND_PRESETS.map((cnt) => {
-                  const busyThis = expandingCount === cnt;
-                  return (
-                    <SpringPressable
-                      key={cnt}
-                      haptic
-                      disabled={expandingCount !== null}
-                      onPress={() => handleExpandActivePlaylist(cnt)}
-                      style={[
-                        styles.expandPresetPill,
-                        cnt === 10 && styles.expandPresetPillPrimary,
-                        expandingCount !== null && !busyThis && { opacity: 0.6 },
-                      ]}
-                    >
-                      {busyThis ? (
-                        <ActivityIndicator
-                          size="small"
-                          color={cnt === 10 ? '#FFFFFF' : colors.brand}
-                        />
-                      ) : (
-                        <Text
-                          style={[
-                            styles.expandPresetText,
-                            cnt === 10 && styles.expandPresetTextPrimary,
-                          ]}
-                        >
-                          +{cnt}
-                        </Text>
-                      )}
-                    </SpringPressable>
-                  );
-                })}
+              <View style={styles.expandFooter}>
+                <Text style={styles.expandFooterLabel}>Şarkı Sayısını Artır</Text>
+                <View style={styles.expandPresetRow}>
+                  {EXPAND_PRESETS.map((cnt) => {
+                    const busyThis = expandingCount === cnt;
+                    return (
+                      <SpringPressable
+                        key={cnt}
+                        haptic
+                        disabled={expandingCount !== null}
+                        onPress={() => handleExpandActivePlaylist(cnt)}
+                        style={[
+                          styles.expandPresetPill,
+                          cnt === 10 && styles.expandPresetPillPrimary,
+                          expandingCount !== null && !busyThis && { opacity: 0.6 },
+                        ]}
+                      >
+                        {busyThis ? (
+                          <ActivityIndicator
+                            size="small"
+                            color={cnt === 10 ? '#FFFFFF' : colors.brand}
+                          />
+                        ) : (
+                          <Text
+                            style={[
+                              styles.expandPresetText,
+                              cnt === 10 && styles.expandPresetTextPrimary,
+                            ]}
+                          >
+                            +{cnt}
+                          </Text>
+                        )}
+                      </SpringPressable>
+                    );
+                  })}
+                </View>
               </View>
-            </View>
-          </Animated.View>
+            </Animated.View>
+          </StaggeredEntry>
         );
       })()}
 
       {/* RECENT PAST SCANS STRIP ON MAIN INTERFACE */}
-      <StaggeredEntry index={2} animationKey={visitTick} style={styles.recentSection}>
+      <StaggeredEntry index={3} active={isActiveTab} style={styles.recentSection}>
         <View style={styles.recentHeader}>
           <Text style={styles.sectionTitle}>Önceki Taramaların</Text>
           <SpringPressable haptic onPress={onSeeAllHistory}>
@@ -1009,41 +1134,40 @@ export const CameraStudioScreen: React.FC<Props> = ({
           </Text>
         ) : (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 11 }}>
-            {recentScans.slice(0, 8).map((scan, idx) => {
+            {recentScans.slice(0, 8).map((scan) => {
               const meta = resolveMoodVisual(scan.mood, scan.emotion, colors);
               const scanMirrored = isFrontCameraSession(scan.deviceLabel);
               return (
-                <StaggeredEntry key={scan.id} index={idx} direction="left" animationKey={visitTick}>
-                  <SpringPressable
-                    haptic
-                    scaleTo={0.96}
-                    onPress={() => onSelectPastSession(scan.id)}
-                    style={[
-                      styles.recentMiniCard,
-                      activeSession?.id === scan.id && styles.recentMiniCardActive,
-                    ]}
-                  >
-                    {scan.snapshotUri ? (
-                      <Image
-                        source={{ uri: scan.snapshotUri }}
-                        style={[styles.recentMiniThumb, scanMirrored && styles.mirroredImage]}
-                      />
-                    ) : (
-                      <View style={[styles.recentMiniThumb, styles.snapFallback]}>
-                        <Ionicons name="musical-note" size={18} color={meta.color} />
-                      </View>
-                    )}
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.recentMoodLabel, { color: meta.color }]}>
-                        {meta.shortTr} · %{Math.round(scan.confidence * 100)}
-                      </Text>
-                      <Text numberOfLines={1} style={styles.recentDateText}>
-                        {formatTimeTR(scan.createdAt)}
-                      </Text>
-                      <Text style={styles.recentTrackCount}>{scan.trackCount} şarkı</Text>
+                <SpringPressable
+                  key={scan.id}
+                  haptic
+                  scaleTo={0.96}
+                  onPress={() => onSelectPastSession(scan.id)}
+                  style={[
+                    styles.recentMiniCard,
+                    activeSession?.id === scan.id && styles.recentMiniCardActive,
+                  ]}
+                >
+                  {scan.snapshotUri ? (
+                    <Image
+                      source={{ uri: scan.snapshotUri }}
+                      style={[styles.recentMiniThumb, scanMirrored && styles.mirroredImage]}
+                    />
+                  ) : (
+                    <View style={[styles.recentMiniThumb, styles.snapFallback]}>
+                      <Ionicons name="musical-note" size={18} color={meta.color} />
                     </View>
-                  </SpringPressable>
-                </StaggeredEntry>
+                  )}
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.recentMoodLabel, { color: meta.color }]}>
+                      {meta.shortTr} · %{Math.round(scan.confidence * 100)}
+                    </Text>
+                    <Text numberOfLines={1} style={styles.recentDateText}>
+                      {formatTimeTR(scan.createdAt)}
+                    </Text>
+                    <Text style={styles.recentTrackCount}>{scan.trackCount} şarkı</Text>
+                  </View>
+                </SpringPressable>
               );
             })}
           </ScrollView>
@@ -1051,7 +1175,7 @@ export const CameraStudioScreen: React.FC<Props> = ({
       </StaggeredEntry>
     </ScrollView>
   );
-};
+});
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
@@ -1643,5 +1767,44 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 10.5,
       color: colors.inkMuted,
       marginTop: 1,
+    },
+    sessionQuickActions: {
+      flexDirection: 'row',
+      gap: 8,
+      marginBottom: 10,
+    },
+    sessionActionPrimary: {
+      flex: 1.25,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      backgroundColor: colors.brandSoft,
+      borderWidth: 1,
+      borderColor: colors.brand,
+      paddingVertical: 9,
+      borderRadius: 12,
+    },
+    sessionActionPrimaryText: {
+      fontSize: 12.5,
+      fontWeight: '800',
+      color: colors.brand,
+    },
+    sessionActionSecondary: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      backgroundColor: colors.elevated,
+      borderWidth: 1,
+      borderColor: colors.hairlineStrong,
+      paddingVertical: 9,
+      borderRadius: 12,
+    },
+    sessionActionSecondaryText: {
+      fontSize: 12.5,
+      fontWeight: '700',
+      color: colors.inkPrimary,
     },
   });

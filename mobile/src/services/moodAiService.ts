@@ -4,7 +4,7 @@ import {
   isNativeVisionAvailable,
   warmupVisionEngine,
 } from '../../modules/moodsync-vision';
-import { EmotionType, MoodType } from '../theme/colors';
+import { ALL_EMOTIONS, EmotionScores, EmotionType, MoodType } from '../theme/colors';
 
 export interface LiveDetectionResult {
   detected: boolean;
@@ -12,9 +12,49 @@ export interface LiveDetectionResult {
   emotion: EmotionType | null;
   emotionLabel: string | null;
   confidence: number;
+  emotionScores: EmotionScores | null;
   faceBox: [number, number, number, number] | null;
   serverConnected: boolean;
   engine?: string;
+}
+
+function normalizeEmotionScores(
+  raw: Record<string, number> | null | undefined,
+  fallbackEmotion: EmotionType | null,
+  fallbackConf: number
+): EmotionScores | null {
+  if (raw && typeof raw === 'object') {
+    const out: EmotionScores = {
+      happy: 0,
+      surprise: 0,
+      neutral: 0,
+      sad: 0,
+      angry: 0,
+    };
+    let sum = 0;
+    for (const em of ALL_EMOTIONS) {
+      const val = Number(raw[em] ?? 0);
+      const safe = Number.isFinite(val) && val > 0 ? val : 0;
+      out[em] = safe;
+      sum += safe;
+    }
+    if (sum > 0) {
+      for (const em of ALL_EMOTIONS) {
+        out[em] = out[em] / sum;
+      }
+      return out;
+    }
+  }
+  if (!fallbackEmotion) return null;
+  const clamped = Math.max(0.4, Math.min(0.95, fallbackConf || 0.78));
+  const rest = (1 - clamped) / (ALL_EMOTIONS.length - 1);
+  return {
+    happy: fallbackEmotion === 'happy' ? clamped : rest,
+    surprise: fallbackEmotion === 'surprise' ? clamped : rest,
+    neutral: fallbackEmotion === 'neutral' ? clamped : rest,
+    sad: fallbackEmotion === 'sad' ? clamped : rest,
+    angry: fallbackEmotion === 'angry' ? clamped : rest,
+  };
 }
 
 export function getAiEngineSummary(): { onDevice: boolean; engine: string; label: string } {
@@ -47,6 +87,7 @@ export async function analyzeCameraFrame(
       emotion: null,
       emotionLabel: null,
       confidence: 0,
+      emotionScores: null,
       faceBox: null,
       serverConnected: false,
       engine: 'none',
@@ -61,12 +102,18 @@ export async function analyzeCameraFrame(
         ['happy', 'surprise', 'neutral', 'sad', 'angry'].includes(nativeRes.emotion)
           ? (nativeRes.emotion as EmotionType)
           : null;
+      const confidence = Number(nativeRes.confidence || 0);
       return {
         detected: Boolean(nativeRes.detected),
         mood: (nativeRes.mood as MoodType) || null,
         emotion: validEmotion,
         emotionLabel: nativeRes.emotionLabel || null,
-        confidence: Number(nativeRes.confidence || 0),
+        confidence,
+        emotionScores: normalizeEmotionScores(
+          nativeRes.emotionScores,
+          validEmotion,
+          confidence
+        ),
         faceBox:
           Array.isArray(nativeRes.faceBox) && nativeRes.faceBox.length === 4
             ? nativeRes.faceBox
@@ -85,6 +132,7 @@ export async function analyzeCameraFrame(
     emotion: null,
     emotionLabel: null,
     confidence: 0,
+    emotionScores: null,
     faceBox: null,
     serverConnected: true,
     engine: 'apple-vision',

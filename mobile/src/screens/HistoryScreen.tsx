@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useEffect, useMemo, useRef } from 'react';
-import { Alert, Animated, Easing, FlatList, Image, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { Alert, Animated, Easing, Image, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SpringPressable, StaggeredEntry } from '../components/MotionPrimitives';
 import { DashboardStats, ScanSessionRecord, TrackRecord } from '../database/iosDatabase';
-import { resolveMoodVisual, ThemePalette } from '../theme/colors';
+import { EmotionType, MoodStrategy, resolveMoodVisual, ThemePalette } from '../theme/colors';
 import { useTheme } from '../theme/ThemeContext';
 import { ScanDetailScreen } from './ScanDetailScreen';
 
@@ -12,13 +12,23 @@ interface Props {
   sessions: ScanSessionRecord[];
   selectedSession: ScanSessionRecord | null;
   stats: DashboardStats;
-  visitTick?: number;
+  isActiveTab: boolean;
   playingTrackId: number | null;
   isAudioPlaying: boolean;
   onOpenSession: (sessionId: number) => void;
   onCloseSession: () => void;
   onPlayTrack: (queue: TrackRecord[], index: number) => void;
   onToggleFavorite: (trackId: number) => void;
+  onTrackMorePress: (track: TrackRecord) => void;
+  onUpdateSessionMoodOrStrategy: (params: {
+    sessionId: number;
+    emotion?: EmotionType;
+    strategy?: MoodStrategy;
+    language?: 'all' | 'tr' | 'global';
+    isManualOverride?: boolean;
+  }) => Promise<void>;
+  onUpdateSessionJournal: (sessionId: number, note: string, tags: string[]) => Promise<void>;
+  onSaveTracksToPlaylist: (tracks: TrackRecord[], suggestedName: string) => void;
   onExpandSessionTracks: (
     sessionId: number,
     addCount: number,
@@ -28,17 +38,21 @@ interface Props {
   onNewScan: () => void;
 }
 
-export const HistoryScreen: React.FC<Props> = ({
+export const HistoryScreen: React.FC<Props> = React.memo(({
   sessions,
   selectedSession,
   stats,
-  visitTick = 0,
+  isActiveTab,
   playingTrackId,
   isAudioPlaying,
   onOpenSession,
   onCloseSession,
   onPlayTrack,
   onToggleFavorite,
+  onTrackMorePress,
+  onUpdateSessionMoodOrStrategy,
+  onUpdateSessionJournal,
+  onSaveTracksToPlaylist,
   onExpandSessionTracks,
   onDeleteSession,
   onNewScan,
@@ -50,19 +64,37 @@ export const HistoryScreen: React.FC<Props> = ({
   const slideX = useRef(new Animated.Value(0)).current;
   const viewOpacity = useRef(new Animated.Value(1)).current;
   const prevShowingDetail = useRef(showingDetail);
+  const prevActiveTabRef = useRef(isActiveTab);
+  const detailAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  const returningFromDetail =
+    prevShowingDetail.current && !showingDetail && prevActiveTabRef.current && isActiveTab;
+  const enteringDetailFromTab =
+    !prevShowingDetail.current && showingDetail && prevActiveTabRef.current && isActiveTab;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const wasActiveTab = prevActiveTabRef.current;
+    prevActiveTabRef.current = isActiveTab;
+
     if (prevShowingDetail.current === showingDetail) return;
     const enteringDetail = showingDetail;
     prevShowingDetail.current = showingDetail;
 
-    slideX.setValue(enteringDetail ? 34 : -34);
-    viewOpacity.setValue(0);
+    detailAnimRef.current?.stop();
 
-    Animated.parallel([
+    if (!wasActiveTab || !isActiveTab) {
+      slideX.setValue(0);
+      viewOpacity.setValue(1);
+      detailAnimRef.current = null;
+      return;
+    }
+
+    slideX.setValue(enteringDetail ? 28 : -28);
+    viewOpacity.setValue(0.35);
+
+    const anim = Animated.parallel([
       Animated.timing(viewOpacity, {
         toValue: 1,
-        duration: 240,
+        duration: 210,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
@@ -73,10 +105,22 @@ export const HistoryScreen: React.FC<Props> = ({
         mass: 0.8,
         useNativeDriver: true,
       }),
-    ]).start();
-  }, [showingDetail, slideX, viewOpacity]);
+    ]);
+    detailAnimRef.current = anim;
+    anim.start(({ finished }) => {
+      if (finished && detailAnimRef.current === anim) {
+        detailAnimRef.current = null;
+      }
+    });
+  }, [isActiveTab, showingDetail, slideX, viewOpacity]);
 
-  const formatDate = (iso: string) => {
+  useEffect(() => {
+    return () => {
+      detailAnimRef.current?.stop();
+    };
+  }, []);
+
+  const formatDate = useCallback((iso: string) => {
     try {
       return new Date(iso).toLocaleDateString('tr-TR', {
         day: 'numeric',
@@ -88,23 +132,26 @@ export const HistoryScreen: React.FC<Props> = ({
     } catch {
       return iso;
     }
-  };
+  }, []);
 
-  const confirmDelete = (sessionId: number) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    Alert.alert(
-      'Taramayı Sil',
-      'Bu geçmiş tarama ve ona ait şarkı listesi kalıcı olarak silinsin mi?',
-      [
-        { text: 'Vazgeç', style: 'cancel' },
-        {
-          text: 'Sil',
-          style: 'destructive',
-          onPress: () => onDeleteSession(sessionId),
-        },
-      ]
-    );
-  };
+  const confirmDelete = useCallback(
+    (sessionId: number) => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      Alert.alert(
+        'Taramayı Sil',
+        'Bu geçmiş tarama ve ona ait şarkı listesi kalıcı olarak silinsin mi?',
+        [
+          { text: 'Vazgeç', style: 'cancel' },
+          {
+            text: 'Sil',
+            style: 'destructive',
+            onPress: () => onDeleteSession(sessionId),
+          },
+        ]
+      );
+    },
+    [onDeleteSession]
+  );
 
   if (selectedSession) {
     return (
@@ -119,9 +166,15 @@ export const HistoryScreen: React.FC<Props> = ({
           session={selectedSession}
           playingTrackId={playingTrackId}
           isAudioPlaying={isAudioPlaying}
+          isActiveTab={isActiveTab}
+          skipInitialEntrance={enteringDetailFromTab}
           onBack={onCloseSession}
           onPlayTrack={onPlayTrack}
           onToggleFavorite={onToggleFavorite}
+          onTrackMorePress={onTrackMorePress}
+          onUpdateMoodOrStrategy={onUpdateSessionMoodOrStrategy}
+          onUpdateJournal={onUpdateSessionJournal}
+          onSaveTracksToPlaylist={onSaveTracksToPlaylist}
           onExpandTracks={onExpandSessionTracks}
           onDeleteSession={(id) => {
             onDeleteSession(id);
@@ -140,123 +193,185 @@ export const HistoryScreen: React.FC<Props> = ({
         transform: [{ translateX: slideX }],
       }}
     >
-      <FlatList
-        data={sessions}
-        keyExtractor={(item) => String(item.id)}
+      <ScrollView
+        style={{ flex: 1 }}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-        ListHeaderComponent={
-          <View style={styles.headerWrap}>
-            <StaggeredEntry index={0} animationKey={visitTick} style={styles.topRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.title}>Geçmiş Taramalar</Text>
-                <Text style={styles.subtitle}>
-                  Daha önce çektiğin fotoğraflar ve o anki moduna özel oluşturulan şarkı listeleri.
-                </Text>
-              </View>
-              <SpringPressable
-                haptic
-                onPress={onNewScan}
-                style={styles.newScanBtn}
-              >
-                <Ionicons name="camera" size={16} color="#FFFFFF" />
-                <Text style={styles.newScanText}>Yeni Çekim</Text>
-              </SpringPressable>
-            </StaggeredEntry>
-
-            <View style={styles.statsGrid}>
-              <StaggeredEntry index={0} animationKey={visitTick} style={styles.statTile}>
-                <Text style={styles.statLabel}>Toplam Tarama</Text>
-                <Text style={styles.statVal}>{stats.totalScans}</Text>
-              </StaggeredEntry>
-              <StaggeredEntry index={1} animationKey={visitTick} style={styles.statTile}>
-                <Text style={styles.statLabel}>Baskın Mod</Text>
-                <Text style={styles.statVal}>
-                  {stats.dominantMood
-                    ? resolveMoodVisual(stats.dominantMood, stats.dominantEmotion, colors).shortTr
-                    : '—'}
-                </Text>
-              </StaggeredEntry>
-              <StaggeredEntry index={2} animationKey={visitTick} style={styles.statTile}>
-                <Text style={styles.statLabel}>Favori Şarkılar</Text>
-                <Text style={styles.statVal}>{stats.favoriteCount}</Text>
-              </StaggeredEntry>
-              <StaggeredEntry index={3} animationKey={visitTick} style={styles.statTile}>
-                <Text style={styles.statLabel}>Şarkı Havuzu</Text>
-                <Text style={styles.statVal}>{stats.catalogTotal}</Text>
-              </StaggeredEntry>
+      >
+        <View style={styles.headerWrap}>
+          <StaggeredEntry
+            index={0}
+            active={isActiveTab}
+            enabled={!returningFromDetail}
+            style={styles.topRow}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.title}>Geçmiş Taramalar</Text>
+              <Text style={styles.subtitle}>
+                Daha önce çektiğin fotoğraflar ve o anki moduna özel oluşturulan şarkı listeleri.
+              </Text>
             </View>
+            <SpringPressable
+              haptic
+              onPress={onNewScan}
+              style={styles.newScanBtn}
+            >
+              <Ionicons name="camera" size={16} color="#FFFFFF" />
+              <Text style={styles.newScanText}>Yeni Çekim</Text>
+            </SpringPressable>
+          </StaggeredEntry>
+
+          <View style={styles.statsGrid}>
+            <StaggeredEntry
+              index={1}
+              active={isActiveTab}
+              enabled={!returningFromDetail}
+              style={styles.statTile}
+            >
+              <Text style={styles.statLabel}>Toplam Tarama</Text>
+              <Text style={styles.statVal}>{stats.totalScans}</Text>
+            </StaggeredEntry>
+            <StaggeredEntry
+              index={1}
+              active={isActiveTab}
+              enabled={!returningFromDetail}
+              style={styles.statTile}
+            >
+              <Text style={styles.statLabel}>Baskın Mod</Text>
+              <Text style={styles.statVal}>
+                {stats.dominantMood
+                  ? resolveMoodVisual(stats.dominantMood, stats.dominantEmotion, colors).shortTr
+                  : '—'}
+              </Text>
+            </StaggeredEntry>
+            <StaggeredEntry
+              index={2}
+              active={isActiveTab}
+              enabled={!returningFromDetail}
+              style={styles.statTile}
+            >
+              <Text style={styles.statLabel}>Favori Şarkılar</Text>
+              <Text style={styles.statVal}>{stats.favoriteCount}</Text>
+            </StaggeredEntry>
+            <StaggeredEntry
+              index={2}
+              active={isActiveTab}
+              enabled={!returningFromDetail}
+              style={styles.statTile}
+            >
+              <Text style={styles.statLabel}>Şarkı Havuzu</Text>
+              <Text style={styles.statVal}>{stats.catalogTotal}</Text>
+            </StaggeredEntry>
           </View>
-        }
-        ListEmptyComponent={
-          <StaggeredEntry index={1} animationKey={visitTick} style={styles.emptyBox}>
+        </View>
+
+        {sessions.length === 0 ? (
+          <StaggeredEntry
+            index={3}
+            active={isActiveTab}
+            enabled={!returningFromDetail}
+            style={styles.emptyBox}
+          >
             <Ionicons name="time-outline" size={36} color={colors.inkMuted} />
             <Text style={styles.emptyTitle}>Henüz kayıtlı bir tarama yok</Text>
             <Text style={styles.emptyDesc}>
               Kamera sekmesinden fotoğraf çektiğinde tüm geçmiş session kayıtların burada saklanır.
             </Text>
           </StaggeredEntry>
-        }
-        renderItem={({ item, index }) => {
-          const meta = resolveMoodVisual(item.mood, item.emotion, colors);
-          const isFront = item.deviceLabel.toLowerCase().includes('ön kamera');
-          return (
-            <StaggeredEntry index={index} animationKey={visitTick} style={styles.card}>
-              <SpringPressable
-                haptic
-                scaleTo={0.985}
-                onPress={() => onOpenSession(item.id)}
-                style={styles.cardTop}
+        ) : (
+          sessions.map((item, idx) => {
+            const meta = resolveMoodVisual(item.mood, item.emotion, colors);
+            const isFront = item.deviceLabel.toLowerCase().includes('ön kamera');
+            const tags = item.tags || [];
+            const note = (item.note || '').trim();
+            return (
+              <StaggeredEntry
+                key={item.id}
+                index={Math.min(idx + 3, 6)}
+                active={isActiveTab}
+                enabled={!returningFromDetail && idx < 5}
+                style={styles.card}
               >
-                {item.snapshotUri ? (
-                  <Image
-                    source={{ uri: item.snapshotUri }}
-                    style={[styles.thumb, isFront && styles.mirroredImage]}
-                  />
-                ) : (
-                  <View style={[styles.thumb, styles.thumbFallback]}>
-                    <Ionicons name="sparkles" size={22} color={meta.color} />
+                <SpringPressable
+                  haptic
+                  scaleTo={0.985}
+                  onPress={() => onOpenSession(item.id)}
+                  style={styles.cardTop}
+                >
+                  {item.snapshotUri ? (
+                    <Image
+                      source={{ uri: item.snapshotUri }}
+                      style={[styles.thumb, isFront && styles.mirroredImage]}
+                    />
+                  ) : (
+                    <View style={[styles.thumb, styles.thumbFallback]}>
+                      <Ionicons name="sparkles" size={22} color={meta.color} />
+                    </View>
+                  )}
+
+                  <View style={{ flex: 1 }}>
+                    <View style={styles.badgeRow}>
+                      <View style={[styles.moodTag, { backgroundColor: meta.softColor }]}>
+                        <Text style={[styles.moodTagText, { color: meta.color }]}>{meta.fullTr}</Text>
+                      </View>
+                      <Text style={styles.confLabel}>%{Math.round(item.confidence * 100)}</Text>
+                      {item.moodStrategy === 'uplift' && (
+                        <View style={styles.upliftPill}>
+                          <Text style={styles.upliftPillText}>Yükselt</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.deviceText}>{item.deviceLabel}</Text>
+                    <Text style={styles.dateText}>{formatDate(item.createdAt)}</Text>
+                  </View>
+
+                  <Ionicons name="chevron-forward" size={18} color={colors.inkMuted} />
+                </SpringPressable>
+
+                {(tags.length > 0 || note.length > 0) && (
+                  <View style={styles.journalPreview}>
+                    {tags.length > 0 && (
+                      <View style={styles.tagMiniRow}>
+                        {tags.slice(0, 3).map((tag) => (
+                          <View key={tag} style={styles.tagMiniPill}>
+                            <Text style={styles.tagMiniText}>#{tag}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                    {note.length > 0 && (
+                      <Text numberOfLines={1} style={styles.noteSnippet}>
+                        “{note}”
+                      </Text>
+                    )}
                   </View>
                 )}
 
-                <View style={{ flex: 1 }}>
-                  <View style={styles.badgeRow}>
-                    <View style={[styles.moodTag, { backgroundColor: meta.softColor }]}>
-                      <Text style={[styles.moodTagText, { color: meta.color }]}>{meta.fullTr}</Text>
-                    </View>
-                    <Text style={styles.confLabel}>%{Math.round(item.confidence * 100)}</Text>
-                  </View>
-                  <Text style={styles.deviceText}>{item.deviceLabel}</Text>
-                  <Text style={styles.dateText}>{formatDate(item.createdAt)}</Text>
+                <View style={styles.cardFooter}>
+                  <SpringPressable
+                    haptic
+                    onPress={() => onOpenSession(item.id)}
+                    style={styles.openBtn}
+                  >
+                    <Ionicons name="musical-notes-outline" size={16} color={colors.inkPrimary} />
+                    <Text style={styles.openBtnText}>Şarkı Listesini Aç ({item.trackCount})</Text>
+                  </SpringPressable>
+
+                  <SpringPressable
+                    onPress={() => confirmDelete(item.id)}
+                    style={styles.deleteBtn}
+                  >
+                    <Ionicons name="trash-outline" size={17} color={colors.inkMuted} />
+                  </SpringPressable>
                 </View>
-
-                <Ionicons name="chevron-forward" size={18} color={colors.inkMuted} />
-              </SpringPressable>
-
-              <View style={styles.cardFooter}>
-                <SpringPressable
-                  haptic
-                  onPress={() => onOpenSession(item.id)}
-                  style={styles.openBtn}
-                >
-                  <Ionicons name="musical-notes-outline" size={16} color={colors.inkPrimary} />
-                  <Text style={styles.openBtnText}>Şarkı Listesini Aç ({item.trackCount})</Text>
-                </SpringPressable>
-
-                <SpringPressable
-                  onPress={() => confirmDelete(item.id)}
-                  style={styles.deleteBtn}
-                >
-                  <Ionicons name="trash-outline" size={17} color={colors.inkMuted} />
-                </SpringPressable>
-              </View>
-            </StaggeredEntry>
-          );
-        }}
-      />
+              </StaggeredEntry>
+            );
+          })
+        )}
+      </ScrollView>
     </Animated.View>
   );
-};
+});
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
@@ -376,6 +491,7 @@ const createStyles = (colors: ThemePalette) =>
       alignItems: 'center',
       gap: 8,
       marginBottom: 4,
+      flexWrap: 'wrap',
     },
     moodTag: {
       paddingHorizontal: 9,
@@ -391,6 +507,17 @@ const createStyles = (colors: ThemePalette) =>
       fontWeight: '700',
       color: colors.inkSecondary,
     },
+    upliftPill: {
+      backgroundColor: colors.brandSoft,
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+      borderRadius: 999,
+    },
+    upliftPillText: {
+      fontSize: 10,
+      fontWeight: '800',
+      color: colors.brand,
+    },
     deviceText: {
       fontSize: 13.5,
       fontWeight: '700',
@@ -400,6 +527,36 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 12,
       color: colors.inkMuted,
       marginTop: 1,
+    },
+    journalPreview: {
+      marginTop: 10,
+      paddingTop: 9,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: colors.hairline,
+      gap: 5,
+    },
+    tagMiniRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 5,
+    },
+    tagMiniPill: {
+      backgroundColor: colors.elevated,
+      borderWidth: 1,
+      borderColor: colors.hairline,
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+      borderRadius: 999,
+    },
+    tagMiniText: {
+      fontSize: 10.5,
+      fontWeight: '700',
+      color: colors.inkSecondary,
+    },
+    noteSnippet: {
+      fontSize: 12,
+      color: colors.inkSecondary,
+      fontStyle: 'italic',
     },
     cardFooter: {
       flexDirection: 'row',

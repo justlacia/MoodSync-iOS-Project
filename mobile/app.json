@@ -2,7 +2,7 @@
   "expo": {
     "name": "MoodSync",
     "slug": "moodsync",
-    "version": "2.0.0",
+    "version": "2.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -22,6 +22,7 @@
       "infoPlist": {
         "NSCameraUsageDescription": "MoodSync, yüz ifadenizi canlı analiz edip o anki modunuza uygun şarkıları önermek için kameranızı kullanır.",
         "NSPhotoLibraryUsageDescription": "MoodSync, seçtiğiniz fotoğraftaki yüz ifadesine uygun şarkı listesi oluşturmak için fotoğraf arşivinize erişir.",
+        "NSFaceIDUsageDescription": "MoodSync, eşleştirdiğiniz hesabınıza şifre girmeden güvenle giriş yapmak ve gizliliğinizi korumak için Face ID kullanır.",
         "ITSAppUsesNonExemptEncryption": false,
         "UIFileSharingEnabled": false,
         "LSSupportsOpeningDocumentsInPlace": false,

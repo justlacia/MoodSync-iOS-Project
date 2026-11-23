@@ -10,6 +10,8 @@ interface Props {
 export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
   const { colors, isDark } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const onFinishRef = useRef(onFinish);
+  onFinishRef.current = onFinish;
   const logoScale = useRef(new Animated.Value(0.68)).current;
   const logoOpacity = useRef(new Animated.Value(0)).current;
   const textTranslate = useRef(new Animated.Value(16)).current;
@@ -100,22 +102,25 @@ export const AnimatedSplashScreen: React.FC<Props> = ({ onFinish }) => {
     );
     barLoops.forEach((l) => l.start());
 
+    let finishAnim: Animated.CompositeAnimation | null = null;
     const finishTimer = setTimeout(() => {
-      Animated.timing(screenOpacity, {
+      finishAnim = Animated.timing(screenOpacity, {
         toValue: 0,
         duration: 420,
         easing: Easing.inOut(Easing.quad),
         useNativeDriver: true,
-      }).start(() => onFinish());
+      });
+      finishAnim.start(() => onFinishRef.current());
     }, 2250);
 
     return () => {
       clearTimeout(finishTimer);
+      finishAnim?.stop();
       r1.stop();
       r2.stop();
       barLoops.forEach((l) => l.stop());
     };
-  }, [barAnims, logoOpacity, logoScale, onFinish, ring1, ring2, screenOpacity, textOpacity, textTranslate]);
+  }, [barAnims, logoOpacity, logoScale, ring1, ring2, screenOpacity, textOpacity, textTranslate]);
 
   return (
     <Animated.View style={[styles.overlay, { opacity: screenOpacity }]}>

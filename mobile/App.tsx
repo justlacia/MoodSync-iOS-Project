@@ -1,26 +1,40 @@
 import { Ionicons } from '@expo/vector-icons';
-import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
+  Dimensions,
   Easing,
   Image,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  addRemoteTrackCommandListener,
+  clearLockScreenSkipCommands,
+  configureLockScreenSkipCommands,
+} from './modules/moodsync-vision';
 import { AnimatedSplashScreen } from './src/components/AnimatedSplashScreen';
 import { LiquidGlassTabBar } from './src/components/LiquidGlassTabBar';
-import { MiniAudioPlayer } from './src/components/MiniAudioPlayer';
+import {
+  ExpandableAudioPlayer,
+  ExpandableAudioPlayerHandle,
+  MiniBarFrame,
+} from './src/components/ExpandableAudioPlayer';
 import { SpringPressable } from './src/components/MotionPrimitives';
+import { PlaylistPickerModal } from './src/components/PlaylistPickerModal';
+import { TrackActionSheetModal } from './src/components/TrackActionSheetModal';
 import {
   clearUserScanSessions,
   DashboardStats,
   deleteScanSession,
+  dislikeTrack,
+  ensureRichCatalogSeeded,
   expandScanSessionTracks,
   getDashboardStats,
   getDatabase,
@@ -29,10 +43,14 @@ import {
   isAdminUser,
   listScanSessions,
   logoutActiveUser,
+  PlaylistRecord,
+  removeTrackFromPlaylist,
   restoreActiveUser,
   ScanSessionRecord,
   toggleFavoriteTrack,
   TrackRecord,
+  updateScanSessionJournal,
+  updateScanSessionMoodOrStrategy,
   UserRecord,
   wipeAllLocalData,
 } from './src/database/iosDatabase';
@@ -43,11 +61,10 @@ import { LoginScreen } from './src/screens/LoginScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { warmupAiEngine } from './src/services/moodAiService';
 import { resolvePlayablePreviewUrl } from './src/services/onlineMusicService';
-import { ThemePalette } from './src/theme/colors';
+import { EmotionType, MoodStrategy, MoodType, ThemePalette } from './src/theme/colors';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 
 type TabKey = 'studio' | 'history' | 'library' | 'settings';
-const TAB_ORDER: TabKey[] = ['studio', 'history', 'library', 'settings'];
 
 const TABS = [
   {
@@ -87,13 +104,72 @@ const TABS = [
 function MainAppContent() {
   const { colors, isDark, cycleTheme } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const insets = useSafeAreaInsets();
+  const { width: winW, height: winH } = Dimensions.get('window');
+
+  const defaultMiniBarFrame = useMemo<MiniBarFrame>(() => {
+    const width = Math.min(winW - 40, 376);
+    const height = 62;
+    const x = (winW - width) / 2;
+    const y = Math.max(120, winH - insets.bottom - 72 - height);
+    return { x, y, width, height };
+  }, [insets.bottom, winH, winW]);
+
+  const [miniBarFrame, setMiniBarFrame] = useState<MiniBarFrame>(defaultMiniBarFrame);
+  const hasMeasuredBarRef = useRef(false);
+  const miniSlotRef = useRef<React.ComponentRef<typeof View>>(null);
+
+  useEffect(() => {
+    if (!hasMeasuredBarRef.current) {
+      setMiniBarFrame(defaultMiniBarFrame);
+    }
+  }, [defaultMiniBarFrame]);
+
+  const handleMeasureMiniBar = useCallback((frame: MiniBarFrame) => {
+    hasMeasuredBarRef.current = true;
+    setMiniBarFrame((prev) =>
+      Math.abs(prev.x - frame.x) < 1 &&
+      Math.abs(prev.y - frame.y) < 1 &&
+      Math.abs(prev.width - frame.width) < 1 &&
+      Math.abs(prev.height - frame.height) < 1
+        ? prev
+        : frame
+    );
+  }, []);
+
+  const measureMiniSlot = useCallback(() => {
+    miniSlotRef.current?.measureInWindow((x, y, width, height) => {
+      if (width > 100 && height > 30 && y > 80) {
+        handleMeasureMiniBar({ x, y, width, height });
+      }
+    });
+  }, [handleMeasureMiniBar]);
 
   const [showSplash, setShowSplash] = useState(true);
   const [dbReady, setDbReady] = useState(false);
   const [user, setUser] = useState<UserRecord | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('studio');
   const [settingsAdminOpen, setSettingsAdminOpen] = useState(false);
-  const [tabVisitTick, setTabVisitTick] = useState(1);
+  const [visitedTabs, setVisitedTabs] = useState<Record<TabKey, boolean>>({
+    studio: true,
+    history: false,
+    library: false,
+    settings: false,
+  });
+
+  // Player gesture sheet imperative ref & playback repeat state
+  const playerSheetRef = useRef<ExpandableAudioPlayerHandle>(null);
+  const [repeatOne, setRepeatOne] = useState(false);
+  const [playlistsRefreshTick, setPlaylistsRefreshTick] = useState(1);
+  const [actionSheetState, setActionSheetState] = useState<{
+    track: TrackRecord;
+    playlistContext: PlaylistRecord | null;
+  } | null>(null);
+  const [playlistPickerState, setPlaylistPickerState] = useState<{
+    tracks: TrackRecord[];
+    suggestedName?: string;
+    suggestedMood?: MoodType | null;
+  } | null>(null);
 
   const [sessions, setSessions] = useState<ScanSessionRecord[]>([]);
   const [activeSession, setActiveSession] = useState<ScanSessionRecord | null>(null);
@@ -111,26 +187,53 @@ function MainAppContent() {
     scanCount: 0,
   });
 
-  // Directional tab transition animations
-  const tabOpacity = useRef(new Animated.Value(1)).current;
-  const tabTranslateX = useRef(new Animated.Value(0)).current;
-  const tabScale = useRef(new Animated.Value(1)).current;
-
   // Header theme icon spin
   const themeSpin = useRef(new Animated.Value(0)).current;
 
+  const userIdRef = useRef<number | null>(null);
+  userIdRef.current = user?.id ?? null;
+  const activeTabRef = useRef<TabKey>(activeTab);
+  activeTabRef.current = activeTab;
+  const themeSpinAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  const activeSessionRef = useRef(activeSession);
+  activeSessionRef.current = activeSession;
+  const selectedHistorySessionRef = useRef(selectedHistorySession);
+  selectedHistorySessionRef.current = selectedHistorySession;
+  const richSeedStartedRef = useRef(false);
+
   // Audio preview state (expo-audio)
   const player = useAudioPlayer(null);
-  const audioStatus = useAudioPlayerStatus(player);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const isAudioPlayingRef = useRef(false);
   const [queue, setQueue] = useState<TrackRecord[]>([]);
   const [queueIdx, setQueueIdx] = useState<number>(-1);
   const currentTrack = queueIdx >= 0 && queueIdx < queue.length ? queue[queueIdx] : null;
+  const currentTrackRef = useRef(currentTrack);
+  currentTrackRef.current = currentTrack;
+  const hasCurrentTrack = Boolean(currentTrack);
+
+  useEffect(() => {
+    if (!hasCurrentTrack) return;
+    const rafId = requestAnimationFrame(() => {
+      measureMiniSlot();
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [hasCurrentTrack, measureMiniSlot]);
+
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const queueIdxRef = useRef(queueIdx);
+  queueIdxRef.current = queueIdx;
+  const repeatOneRef = useRef(repeatOne);
+  repeatOneRef.current = repeatOne;
 
   const isAdmin = isAdminUser(user);
 
   useEffect(() => {
     setAudioModeAsync({
       playsInSilentMode: true,
+      shouldPlayInBackground: true,
+      interruptionMode: 'doNotMix',
     }).catch(() => {});
     void warmupAiEngine();
 
@@ -154,7 +257,13 @@ function MainAppContent() {
   const refreshStorageInfo = useCallback(async () => {
     try {
       const summary = await getSandboxStorageSummary();
-      setStorageInfo(summary);
+      setStorageInfo((prev) =>
+        prev.photoCount === summary.photoCount &&
+        prev.trackCount === summary.trackCount &&
+        prev.scanCount === summary.scanCount
+          ? prev
+          : summary
+      );
     } catch {
       // Ignore transient storage check error
     }
@@ -202,10 +311,81 @@ function MainAppContent() {
     }
   }, [activeTab, refreshStorageInfo, user]);
 
+  // Warm up rich song catalog after boot so Şarkılar shows many tracks immediately
+  useEffect(() => {
+    if (!dbReady || richSeedStartedRef.current) return;
+    richSeedStartedRef.current = true;
+    ensureRichCatalogSeeded(180)
+      .then((added) => {
+        if (added > 0) {
+          setPlaylistsRefreshTick((t) => t + 1);
+          if (userIdRef.current) {
+            void refreshUserWorkspace(userIdRef.current, true);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [dbReady, refreshUserWorkspace]);
+
+  const animateToTab = useCallback((next: TabKey) => {
+    if (activeTabRef.current === next) return;
+    activeTabRef.current = next;
+    Haptics.selectionAsync().catch(() => {});
+    setVisitedTabs((prev) => (prev[next] ? prev : { ...prev, [next]: true }));
+    setActiveTab(next);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      themeSpinAnimRef.current?.stop();
+    };
+  }, []);
+
+  const resetTabsToStudio = useCallback(() => {
+    setActiveTab('studio');
+    setVisitedTabs({ studio: true, history: false, library: false, settings: false });
+    setSettingsAdminOpen(false);
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    player.pause();
+    player.clearLockScreenControls();
+    clearLockScreenSkipCommands();
+    playerSheetRef.current?.closeImmediate();
+    setActionSheetState(null);
+    setPlaylistPickerState(null);
+    setQueue([]);
+    setQueueIdx(-1);
+    setActiveSession(null);
+    setSelectedHistorySession(null);
+    setSessions([]);
+    resetTabsToStudio();
+    await logoutActiveUser();
+    setUser(null);
+  }, [player, resetTabsToStudio]);
+
+  const requestAdminAccess = useCallback(
+    (open: boolean, alsoSwitchTab = false) => {
+      if (!open) {
+        setSettingsAdminOpen(false);
+        if (alsoSwitchTab) animateToTab('settings');
+        return;
+      }
+      if (!isAdmin || !user) return;
+      setSettingsAdminOpen(true);
+      if (alsoSwitchTab) animateToTab('settings');
+    },
+    [animateToTab, isAdmin, user]
+  );
+
   const switchTab = useCallback(
     (next: TabKey, options?: { openAdmin?: boolean }) => {
-      if (next === 'settings' && options?.openAdmin !== undefined) {
-        setSettingsAdminOpen(Boolean(options.openAdmin && isAdmin));
+      if (next === 'settings' && options?.openAdmin === true) {
+        void requestAdminAccess(true, true);
+        return;
+      }
+      if (next === 'settings' && options?.openAdmin === false) {
+        setSettingsAdminOpen(false);
       } else if (next === 'settings' && activeTab === 'settings') {
         if (settingsAdminOpen) {
           Haptics.selectionAsync().catch(() => {});
@@ -220,86 +400,159 @@ function MainAppContent() {
         return;
       }
 
-      if (next === activeTab) {
-        return;
-      }
-
-      Haptics.selectionAsync().catch(() => {});
-      const prevIdx = TAB_ORDER.indexOf(activeTab);
-      const nextIdx = TAB_ORDER.indexOf(next);
-      const dir = nextIdx >= prevIdx ? 1 : -1;
-
-      setActiveTab(next);
-      setTabVisitTick((t) => t + 1);
-      tabOpacity.setValue(0);
-      tabTranslateX.setValue(dir * 22);
-      tabScale.setValue(0.985);
-
-      Animated.parallel([
-        Animated.timing(tabOpacity, {
-          toValue: 1,
-          duration: 240,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.spring(tabTranslateX, {
-          toValue: 0,
-          damping: 20,
-          stiffness: 220,
-          mass: 0.78,
-          useNativeDriver: true,
-        }),
-        Animated.spring(tabScale, {
-          toValue: 1,
-          damping: 20,
-          stiffness: 220,
-          useNativeDriver: true,
-        }),
-      ]).start();
+      animateToTab(next);
     },
-    [activeTab, isAdmin, selectedHistorySession, settingsAdminOpen, tabOpacity, tabScale, tabTranslateX]
+    [activeTab, animateToTab, requestAdminAccess, selectedHistorySession, settingsAdminOpen]
   );
-
-  // Auto-advance to next track when 30s preview finishes
-  useEffect(() => {
-    if (audioStatus.didJustFinish && queue.length > 0 && queueIdx + 1 < queue.length) {
-      handlePlayFromQueue(queue, queueIdx + 1);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioStatus.didJustFinish]);
 
   const playRequestIdRef = useRef(0);
 
-  const handlePlayFromQueue = async (trackList: TrackRecord[], index: number) => {
-    const target = trackList[index];
-    if (!target) return;
+  const handlePlayFromQueue = useCallback(
+    async (trackList: TrackRecord[], index: number, forcePlay = false) => {
+      const target = trackList[index];
+      if (!target) return;
 
-    if (currentTrack && currentTrack.id === target.id) {
-      if (audioStatus.playing) {
-        player.pause();
-      } else {
-        player.play();
+      const cur = currentTrackRef.current;
+      if (!forcePlay && cur && cur.id === target.id) {
+        if (isAudioPlayingRef.current) {
+          player.pause();
+        } else {
+          player.play();
+        }
+        return;
       }
+
+      const reqId = ++playRequestIdRef.current;
+      const streamUrl = await resolvePlayablePreviewUrl(target);
+      if (reqId !== playRequestIdRef.current) return;
+      if (!streamUrl) {
+        Alert.alert(
+          'Önizleme Bulunamadı',
+          'Bu şarkı için sağdaki menüden Apple Music, Spotify veya YouTube Music’te açabilirsiniz.'
+        );
+        return;
+      }
+
+      setQueue(trackList);
+      setQueueIdx(index);
+      player.replace({ uri: streamUrl });
+      player.play();
+    },
+    [player]
+  );
+
+  const handlePlayFromQueueRef = useRef(handlePlayFromQueue);
+  handlePlayFromQueueRef.current = handlePlayFromQueue;
+
+  const handleNextTrack = useCallback(() => {
+    const q = queueRef.current;
+    const idx = queueIdxRef.current;
+    if (idx + 1 < q.length) {
+      void handlePlayFromQueueRef.current(q, idx + 1, true);
+    }
+  }, []);
+
+  const handlePreviousTrack = useCallback(() => {
+    const q = queueRef.current;
+    const idx = queueIdxRef.current;
+    const elapsed = Number(player.currentTime || 0);
+    if (elapsed > 3 || (idx === 0 && elapsed > 1.2)) {
+      void player.seekTo(0);
       return;
     }
+    if (idx > 0) {
+      void handlePlayFromQueueRef.current(q, idx - 1, true);
+    }
+  }, [player]);
 
-    const reqId = ++playRequestIdRef.current;
-    const streamUrl = await resolvePlayablePreviewUrl(target);
-    if (reqId !== playRequestIdRef.current) return;
-    if (!streamUrl) {
-      Alert.alert('Önizleme Bulunamadı', 'Bu şarkı için dış bağlantıyı (sağdaki ikon) açabilirsiniz.');
+  const handleNextRef = useRef(handleNextTrack);
+  handleNextRef.current = handleNextTrack;
+  const handlePreviousRef = useRef(handlePreviousTrack);
+  handlePreviousRef.current = handlePreviousTrack;
+
+  // Subscribe to player status without re-rendering MainAppContent on playhead ticks
+  useEffect(() => {
+    const syncPlaying = (playing: boolean) => {
+      if (playing !== isAudioPlayingRef.current) {
+        isAudioPlayingRef.current = playing;
+        setIsAudioPlaying(playing);
+      }
+    };
+    syncPlaying(Boolean(player.playing));
+    const sub = player.addListener('playbackStatusUpdate', (status) => {
+      syncPlaying(Boolean(status.playing));
+      if (!status.didJustFinish) return;
+      if (repeatOneRef.current && queueIdxRef.current >= 0) {
+        void player.seekTo(0).then(() => player.play());
+        return;
+      }
+      if (queueRef.current.length > 0 && queueIdxRef.current + 1 < queueRef.current.length) {
+        handleNextRef.current();
+      }
+    });
+    return () => {
+      sub.remove();
+    };
+  }, [player]);
+
+  // Sync iOS Lock Screen metadata & Previous/Next remote commands
+  useEffect(() => {
+    if (!currentTrack) {
+      player.clearLockScreenControls();
+      clearLockScreenSkipCommands();
       return;
     }
+    const canPrev = queueIdx > 0;
+    const canNext = queueIdx + 1 < queue.length;
+    try {
+      player.setActiveForLockScreen(
+        true,
+        {
+          title: currentTrack.title,
+          artist: currentTrack.artist,
+          albumTitle: currentTrack.album || 'MoodSync',
+          artworkUrl: currentTrack.artworkUrl || undefined,
+        },
+        {
+          showSeekForward: false,
+          showSeekBackward: false,
+          showNextTrack: canNext,
+          showPreviousTrack: canPrev,
+        }
+      );
+    } catch {
+      // Ignore if lock screen audio session is temporarily inactive
+    }
+    configureLockScreenSkipCommands(canPrev, canNext);
+  }, [currentTrack, player, queue.length, queueIdx]);
 
-    setQueue(trackList);
-    setQueueIdx(index);
-    player.replace({ uri: streamUrl });
-    player.play();
-  };
+  // Listen to native iOS Lock Screen / Control Center Previous & Next triggers
+  useEffect(() => {
+    const sub = addRemoteTrackCommandListener((event) => {
+      if (event.direction === 'next') {
+        handleNextRef.current();
+      } else if (event.direction === 'previous') {
+        handlePreviousRef.current();
+      }
+    });
+    return () => {
+      sub?.remove();
+      clearLockScreenSkipCommands();
+    };
+  }, []);
 
-  const handleToggleFavorite = async (trackId: number) => {
-    if (!user) return;
-    const liked = await toggleFavoriteTrack(user.id, trackId);
+  const handleSeekTo = useCallback(
+    (seconds: number) => {
+      const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+      void player.seekTo(safe);
+    },
+    [player]
+  );
+
+  const handleToggleFavorite = useCallback(async (trackId: number) => {
+    const uid = userIdRef.current;
+    if (!uid) return;
+    const liked = await toggleFavoriteTrack(uid, trackId);
 
     setActiveSession((prev) => {
       if (!prev?.tracks) return prev;
@@ -315,66 +568,237 @@ function MainAppContent() {
         tracks: prev.tracks.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)),
       };
     });
-    const dash = await getDashboardStats(user.id);
+    setQueue((prev) => prev.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)));
+    setActionSheetState((prev) =>
+      prev && prev.track.id === trackId
+        ? { ...prev, track: { ...prev.track, isFavorite: liked } }
+        : prev
+    );
+    const dash = await getDashboardStats(uid);
     setStats(dash);
-  };
+  }, []);
 
-  const handleOpenHistorySession = async (sessionId: number) => {
-    if (!user) return;
-    const full = await getScanSessionWithTracks(sessionId, user.id);
-    if (full) {
-      setSelectedHistorySession(full);
-      if (activeTab !== 'history') {
-        switchTab('history');
+  const handleDislikeTrack = useCallback(
+    async (track: TrackRecord) => {
+      const uid = userIdRef.current;
+      if (!uid) return;
+      await dislikeTrack(uid, track.id);
+
+      setActiveSession((prev) => {
+        if (!prev?.tracks) return prev;
+        const filtered = prev.tracks.filter((t) => t.id !== track.id);
+        return { ...prev, tracks: filtered, trackCount: filtered.length };
+      });
+      setSelectedHistorySession((prev) => {
+        if (!prev?.tracks) return prev;
+        const filtered = prev.tracks.filter((t) => t.id !== track.id);
+        return { ...prev, tracks: filtered, trackCount: filtered.length };
+      });
+
+      const curIdx = queueIdxRef.current;
+      const curQueue = queueRef.current;
+      const removedIndex = curQueue.findIndex((t) => t.id === track.id);
+      if (removedIndex !== -1) {
+        const nextQueue = curQueue.filter((t) => t.id !== track.id);
+        if (nextQueue.length === 0) {
+          player.pause();
+          playerSheetRef.current?.closeImmediate();
+          setQueue([]);
+          setQueueIdx(-1);
+        } else if (removedIndex === curIdx) {
+          const nextIdx = Math.min(curIdx, nextQueue.length - 1);
+          void handlePlayFromQueueRef.current(nextQueue, nextIdx, true);
+        } else {
+          setQueue(nextQueue);
+          if (removedIndex < curIdx) {
+            setQueueIdx(curIdx - 1);
+          }
+        }
       }
-    }
-  };
 
-  const handleExpandSessionTracks = async (
-    sessionId: number,
-    addCount: number,
-    language: 'all' | 'tr' | 'global'
-  ) => {
-    if (!user) return null;
-    const result = await expandScanSessionTracks({
-      sessionId,
-      userId: user.id,
-      addCount,
-      language,
+      setPlaylistsRefreshTick((t) => t + 1);
+      await refreshUserWorkspace(uid, true);
+    },
+    [player, refreshUserWorkspace]
+  );
+
+  const handlePlayTrack = useCallback(
+    (q: TrackRecord[], idx: number) => {
+      void handlePlayFromQueue(q, idx);
+    },
+    [handlePlayFromQueue]
+  );
+
+  const handleLibraryTrackMore = useCallback(
+    (track: TrackRecord, playlistContext?: PlaylistRecord | null) => {
+      setActionSheetState({ track, playlistContext: playlistContext || null });
+    },
+    []
+  );
+
+  const handleCatalogExpanded = useCallback(() => {
+    const uid = userIdRef.current;
+    if (uid) {
+      void refreshUserWorkspace(uid);
+    }
+  }, [refreshUserWorkspace]);
+
+  const handleTogglePlay = useCallback(() => {
+    if (isAudioPlayingRef.current) {
+      player.pause();
+    } else {
+      player.play();
+    }
+  }, [player]);
+
+  const handleStopAndDismiss = useCallback(() => {
+    player.pause();
+    player.clearLockScreenControls();
+    clearLockScreenSkipCommands();
+    playerSheetRef.current?.closeImmediate();
+    setQueue([]);
+    setQueueIdx(-1);
+  }, [player]);
+
+  const handleToggleRepeatOne = useCallback(() => {
+    setRepeatOne((v) => !v);
+  }, []);
+
+  const handleSelectQueueIndex = useCallback(
+    (idx: number) => {
+      void handlePlayFromQueue(queueRef.current, idx, true);
+    },
+    [handlePlayFromQueue]
+  );
+
+  const handleAddPlayerTrackToPlaylist = useCallback((track: TrackRecord) => {
+    playerSheetRef.current?.collapse(2.0);
+    setPlaylistPickerState({
+      tracks: [track],
+      suggestedName: '',
+      suggestedMood: track.mood,
     });
-    if (!result) return null;
+  }, []);
 
-    setSelectedHistorySession((prev) => (prev?.id === sessionId ? result.session : prev));
-    setActiveSession((prev) => (prev?.id === sessionId ? result.session : prev));
-    await refreshUserWorkspace(user.id, true);
-    return {
-      addedCount: result.addedCount,
-      totalCount: result.session.trackCount,
-    };
-  };
+  const handleDislikePlayerTrack = useCallback(
+    (track: TrackRecord) => {
+      void handleDislikeTrack(track);
+    },
+    [handleDislikeTrack]
+  );
 
-  const handleDeletePastSession = async (sessionId: number) => {
-    if (!user) return;
-    await deleteScanSession(sessionId, user.id);
-    if (activeSession?.id === sessionId) {
-      setActiveSession(null);
-    }
-    if (selectedHistorySession?.id === sessionId) {
-      setSelectedHistorySession(null);
-    }
-    await refreshUserWorkspace(user.id, true);
-  };
+  const handleSelectTab = useCallback((key: TabKey) => switchTab(key), [switchTab]);
 
-  const handleClearOwnHistory = async () => {
-    if (!user) return;
-    await clearUserScanSessions(user.id);
+  const handleUpdateSessionMoodOrStrategy = useCallback(
+    async (params: {
+      sessionId: number;
+      emotion?: EmotionType;
+      strategy?: MoodStrategy;
+      language?: 'all' | 'tr' | 'global';
+      isManualOverride?: boolean;
+    }) => {
+      const uid = userIdRef.current;
+      if (!uid) return;
+      const updated = await updateScanSessionMoodOrStrategy({
+        ...params,
+        userId: uid,
+      });
+      if (!updated) return;
+      setActiveSession((prev) => (prev?.id === params.sessionId ? updated : prev));
+      setSelectedHistorySession((prev) => (prev?.id === params.sessionId ? updated : prev));
+      await refreshUserWorkspace(uid, true);
+    },
+    [refreshUserWorkspace]
+  );
+
+  const handleUpdateSessionJournal = useCallback(
+    async (sessionId: number, note: string, tags: string[]) => {
+      const uid = userIdRef.current;
+      if (!uid) return;
+      const updated = await updateScanSessionJournal({
+        sessionId,
+        userId: uid,
+        note,
+        tags,
+      });
+      if (!updated) return;
+      setActiveSession((prev) => (prev?.id === sessionId ? updated : prev));
+      setSelectedHistorySession((prev) => (prev?.id === sessionId ? updated : prev));
+      await refreshUserWorkspace(uid, true);
+    },
+    [refreshUserWorkspace]
+  );
+
+  const handleOpenHistorySession = useCallback(
+    async (sessionId: number) => {
+      const uid = userIdRef.current;
+      if (!uid) return;
+      const full = await getScanSessionWithTracks(sessionId, uid);
+      if (full) {
+        setSelectedHistorySession(full);
+        if (activeTabRef.current !== 'history') {
+          switchTab('history');
+        }
+      }
+    },
+    [switchTab]
+  );
+
+  const handleExpandSessionTracks = useCallback(
+    async (sessionId: number, addCount: number, language: 'all' | 'tr' | 'global') => {
+      const uid = userIdRef.current;
+      if (!uid) return null;
+      const result = await expandScanSessionTracks({
+        sessionId,
+        userId: uid,
+        addCount,
+        language,
+      });
+      if (!result) return null;
+
+      setSelectedHistorySession((prev) => (prev?.id === sessionId ? result.session : prev));
+      setActiveSession((prev) => (prev?.id === sessionId ? result.session : prev));
+      await refreshUserWorkspace(uid, true);
+      return {
+        addedCount: result.addedCount,
+        totalCount: result.session.trackCount,
+      };
+    },
+    [refreshUserWorkspace]
+  );
+
+  const handleDeletePastSession = useCallback(
+    async (sessionId: number) => {
+      const uid = userIdRef.current;
+      if (!uid) return;
+      await deleteScanSession(sessionId, uid);
+      if (activeSessionRef.current?.id === sessionId) {
+        setActiveSession(null);
+      }
+      if (selectedHistorySessionRef.current?.id === sessionId) {
+        setSelectedHistorySession(null);
+      }
+      await refreshUserWorkspace(uid, true);
+    },
+    [refreshUserWorkspace]
+  );
+
+  const handleClearOwnHistory = useCallback(async () => {
+    const uid = userIdRef.current;
+    if (!uid) return;
+    await clearUserScanSessions(uid);
     setActiveSession(null);
     setSelectedHistorySession(null);
-    await refreshUserWorkspace(user.id, true);
-  };
+    await refreshUserWorkspace(uid, true);
+  }, [refreshUserWorkspace]);
 
-  const handleWipeAllData = async () => {
+  const handleWipeAllData = useCallback(async () => {
     player.pause();
+    player.clearLockScreenControls();
+    clearLockScreenSkipCommands();
+    playerSheetRef.current?.closeImmediate();
+    setActionSheetState(null);
+    setPlaylistPickerState(null);
     setQueue([]);
     setQueueIdx(-1);
     setActiveSession(null);
@@ -382,51 +806,111 @@ function MainAppContent() {
     setSessions([]);
     await wipeAllLocalData();
     setUser(null);
-    setActiveTab('studio');
-    setSettingsAdminOpen(false);
+    resetTabsToStudio();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-  };
+  }, [player, resetTabsToStudio]);
 
-  const handleLogout = async () => {
-    player.pause();
-    setQueue([]);
-    setQueueIdx(-1);
-    setActiveSession(null);
-    setSelectedHistorySession(null);
-    setSessions([]);
-    setSettingsAdminOpen(false);
-    setActiveTab('studio');
-    await logoutActiveUser();
-    setUser(null);
-  };
-
-  const handleDatabaseMutated = () => {
-    if (user) {
-      refreshUserWorkspace(user.id, true);
+  const handleDatabaseMutated = useCallback(() => {
+    setPlaylistsRefreshTick((t) => t + 1);
+    const uid = userIdRef.current;
+    if (uid) {
+      void refreshUserWorkspace(uid, true);
     }
-  };
+  }, [refreshUserWorkspace]);
 
-  const handleThemeCyclePress = () => {
+  const handleThemeCyclePress = useCallback(() => {
     Haptics.selectionAsync().catch(() => {});
+    themeSpinAnimRef.current?.stop();
     themeSpin.setValue(0);
-    Animated.timing(themeSpin, {
+    const anim = Animated.timing(themeSpin, {
       toValue: 1,
       duration: 420,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
-    }).start();
+    });
+    themeSpinAnimRef.current = anim;
+    anim.start(({ finished }) => {
+      if (finished && themeSpinAnimRef.current === anim) {
+        themeSpinAnimRef.current = null;
+      }
+    });
     cycleTheme();
-  };
+  }, [cycleTheme, themeSpin]);
+
+  const handleSplashFinish = useCallback(() => setShowSplash(false), []);
+
+  const handleAuthenticated = useCallback(
+    (u: UserRecord) => {
+      setSelectedHistorySession(null);
+      resetTabsToStudio();
+      setUser(u);
+    },
+    [resetTabsToStudio]
+  );
+
+  const handleStudioSessionCreated = useCallback(
+    (newSess: ScanSessionRecord) => {
+      setActiveSession(newSess);
+      const uid = userIdRef.current;
+      if (uid) {
+        void refreshUserWorkspace(uid);
+      }
+    },
+    [refreshUserWorkspace]
+  );
+
+  const handleStudioSeeAllHistory = useCallback(() => {
+    setSelectedHistorySession(null);
+    switchTab('history');
+  }, [switchTab]);
+
+  const handleSessionTrackMore = useCallback((track: TrackRecord) => {
+    setActionSheetState({ track, playlistContext: null });
+  }, []);
+
+  const handleStudioSaveTracksToPlaylist = useCallback(
+    (tracks: TrackRecord[], suggestedName: string) => {
+      setPlaylistPickerState({
+        tracks,
+        suggestedName,
+        suggestedMood: activeSessionRef.current?.mood || null,
+      });
+    },
+    []
+  );
+
+  const handleCloseHistorySession = useCallback(() => {
+    setSelectedHistorySession(null);
+  }, []);
+
+  const handleHistorySaveTracksToPlaylist = useCallback(
+    (tracks: TrackRecord[], suggestedName: string) => {
+      setPlaylistPickerState({
+        tracks,
+        suggestedName,
+        suggestedMood: selectedHistorySessionRef.current?.mood || null,
+      });
+    },
+    []
+  );
+
+  const handleHistoryNewScan = useCallback(() => {
+    setSelectedHistorySession(null);
+    setCameraLaunchTick((t) => t + 1);
+    switchTab('studio');
+  }, [switchTab]);
+
+  const handleSettingsSetAdminMode = useCallback(
+    (open: boolean) => {
+      void requestAdminAccess(open, false);
+    },
+    [requestAdminAccess]
+  );
 
   const themeSpinRotate = themeSpin.interpolate({
     inputRange: [0, 1],
     outputRange: ['0deg', '360deg'],
   });
-
-  const progressRatio =
-    audioStatus.duration && audioStatus.duration > 0
-      ? audioStatus.currentTime / audioStatus.duration
-      : 0;
 
   const dockTabs = useMemo(
     () =>
@@ -443,21 +927,12 @@ function MainAppContent() {
     <View style={{ flex: 1, backgroundColor: colors.canvas }}>
       <StatusBar style={isDark ? 'light' : 'dark'} />
 
-      {dbReady && !user && (
-        <LoginScreen
-          onAuthenticated={(u) => {
-            setSelectedHistorySession(null);
-            setSettingsAdminOpen(false);
-            setActiveTab('studio');
-            setTabVisitTick((t) => t + 1);
-            setUser(u);
-          }}
-        />
-      )}
+      {dbReady && !user && <LoginScreen onAuthenticated={handleAuthenticated} />}
 
       {dbReady && user && (
-        <SafeAreaView style={styles.appSafe} edges={['top', 'left', 'right']}>
-          {/* Top App Header */}
+        <>
+          <SafeAreaView style={styles.appSafe} edges={['top', 'left', 'right']}>
+            {/* Top App Header */}
           <View style={styles.topHeader}>
             <View style={styles.brandRow}>
               <Image source={appLogo} style={styles.headerLogo} />
@@ -506,129 +981,189 @@ function MainAppContent() {
             </View>
           </View>
 
-          {/* Active Screen with directional slide+fade+scale transition */}
-          <Animated.View
-            style={{
-              flex: 1,
-              opacity: tabOpacity,
-              transform: [{ translateX: tabTranslateX }, { scale: tabScale }],
-            }}
-          >
-            {activeTab === 'studio' && (
-              <CameraStudioScreen
-                userId={user.id}
-                userFirstName={user.displayName.split(' ')[0]}
-                isActiveTab={activeTab === 'studio'}
-                visitTick={tabVisitTick}
-                launchCameraTick={cameraLaunchTick}
-                activeSession={activeSession}
-                recentScans={sessions}
-                playingTrackId={currentTrack?.id || null}
-                isAudioPlaying={Boolean(audioStatus.playing)}
-                onSessionCreated={(newSess) => {
-                  setActiveSession(newSess);
-                  refreshUserWorkspace(user.id);
-                }}
-                onSelectPastSession={handleOpenHistorySession}
-                onSeeAllHistory={() => {
-                  setSelectedHistorySession(null);
-                  switchTab('history');
-                }}
-                onPlayTrack={handlePlayFromQueue}
-                onToggleFavorite={handleToggleFavorite}
-                onExpandSessionTracks={handleExpandSessionTracks}
-                onCatalogExpanded={() => refreshUserWorkspace(user.id)}
-              />
+          {/* Lazy keep-alive tab panes driven by pre-primed StaggeredEntry */}
+          <View style={{ flex: 1 }}>
+            {visitedTabs.studio && (
+              <View style={[styles.tabPane, activeTab !== 'studio' && styles.tabPaneHidden]}>
+                <CameraStudioScreen
+                  userId={user.id}
+                  userFirstName={user.displayName.split(' ')[0]}
+                  isActiveTab={activeTab === 'studio'}
+                  launchCameraTick={cameraLaunchTick}
+                  activeSession={activeSession}
+                  recentScans={sessions}
+                  playingTrackId={currentTrack?.id || null}
+                  isAudioPlaying={isAudioPlaying}
+                  onSessionCreated={handleStudioSessionCreated}
+                  onSelectPastSession={handleOpenHistorySession}
+                  onSeeAllHistory={handleStudioSeeAllHistory}
+                  onPlayTrack={handlePlayTrack}
+                  onToggleFavorite={handleToggleFavorite}
+                  onTrackMorePress={handleSessionTrackMore}
+                  onUpdateSessionMoodOrStrategy={handleUpdateSessionMoodOrStrategy}
+                  onUpdateSessionJournal={handleUpdateSessionJournal}
+                  onSaveTracksToPlaylist={handleStudioSaveTracksToPlaylist}
+                  onExpandSessionTracks={handleExpandSessionTracks}
+                  onCatalogExpanded={handleCatalogExpanded}
+                />
+              </View>
             )}
 
-            {activeTab === 'history' && (
-              <HistoryScreen
-                sessions={sessions}
-                selectedSession={selectedHistorySession}
-                stats={stats}
-                visitTick={tabVisitTick}
-                playingTrackId={currentTrack?.id || null}
-                isAudioPlaying={Boolean(audioStatus.playing)}
-                onOpenSession={handleOpenHistorySession}
-                onCloseSession={() => setSelectedHistorySession(null)}
-                onPlayTrack={handlePlayFromQueue}
-                onToggleFavorite={handleToggleFavorite}
-                onExpandSessionTracks={handleExpandSessionTracks}
-                onDeleteSession={handleDeletePastSession}
-                onNewScan={() => {
-                  setSelectedHistorySession(null);
-                  setCameraLaunchTick((t) => t + 1);
-                  switchTab('studio');
-                }}
-              />
+            {visitedTabs.history && (
+              <View style={[styles.tabPane, activeTab !== 'history' && styles.tabPaneHidden]}>
+                <HistoryScreen
+                  sessions={sessions}
+                  selectedSession={selectedHistorySession}
+                  stats={stats}
+                  isActiveTab={activeTab === 'history'}
+                  playingTrackId={currentTrack?.id || null}
+                  isAudioPlaying={isAudioPlaying}
+                  onOpenSession={handleOpenHistorySession}
+                  onCloseSession={handleCloseHistorySession}
+                  onPlayTrack={handlePlayTrack}
+                  onToggleFavorite={handleToggleFavorite}
+                  onTrackMorePress={handleSessionTrackMore}
+                  onUpdateSessionMoodOrStrategy={handleUpdateSessionMoodOrStrategy}
+                  onUpdateSessionJournal={handleUpdateSessionJournal}
+                  onSaveTracksToPlaylist={handleHistorySaveTracksToPlaylist}
+                  onExpandSessionTracks={handleExpandSessionTracks}
+                  onDeleteSession={handleDeletePastSession}
+                  onNewScan={handleHistoryNewScan}
+                />
+              </View>
             )}
 
-            {activeTab === 'library' && (
-              <LibraryScreen
-                userId={user.id}
-                catalogTotal={stats.catalogTotal}
-                visitTick={tabVisitTick}
-                playingTrackId={currentTrack?.id || null}
-                isAudioPlaying={Boolean(audioStatus.playing)}
-                onPlayTrack={handlePlayFromQueue}
-                onToggleFavorite={handleToggleFavorite}
-                onCatalogExpanded={() => refreshUserWorkspace(user.id)}
-              />
+            {visitedTabs.library && (
+              <View style={[styles.tabPane, activeTab !== 'library' && styles.tabPaneHidden]}>
+                <LibraryScreen
+                  userId={user.id}
+                  catalogTotal={stats.catalogTotal}
+                  isActiveTab={activeTab === 'library'}
+                  playlistsRefreshTick={playlistsRefreshTick}
+                  playingTrackId={currentTrack?.id || null}
+                  isAudioPlaying={isAudioPlaying}
+                  onPlayTrack={handlePlayTrack}
+                  onToggleFavorite={handleToggleFavorite}
+                  onTrackMorePress={handleLibraryTrackMore}
+                  onCatalogExpanded={handleCatalogExpanded}
+                />
+              </View>
             )}
 
-            {activeTab === 'settings' && (
-              <SettingsScreen
-                user={user}
-                stats={stats}
-                storageInfo={storageInfo}
-                adminMode={settingsAdminOpen}
-                visitTick={tabVisitTick}
-                onSetAdminMode={(open) => setSettingsAdminOpen(Boolean(open && isAdmin))}
-                onPlayTrack={handlePlayFromQueue}
-                onDatabaseMutated={handleDatabaseMutated}
-                onClearOwnHistory={handleClearOwnHistory}
-                onWipeAllData={handleWipeAllData}
-                onLogout={handleLogout}
-              />
+            {visitedTabs.settings && (
+              <View style={[styles.tabPane, activeTab !== 'settings' && styles.tabPaneHidden]}>
+                <SettingsScreen
+                  user={user}
+                  stats={stats}
+                  storageInfo={storageInfo}
+                  adminMode={settingsAdminOpen}
+                  isActiveTab={activeTab === 'settings'}
+                  onSetAdminMode={handleSettingsSetAdminMode}
+                  onPlayTrack={handlePlayTrack}
+                  onDatabaseMutated={handleDatabaseMutated}
+                  onBiometricSettingsChanged={handleDatabaseMutated}
+                  onClearOwnHistory={handleClearOwnHistory}
+                  onWipeAllData={handleWipeAllData}
+                  onLogout={handleLogout}
+                />
+              </View>
             )}
-          </Animated.View>
+          </View>
 
-          {/* Floating Mini Player + iOS 27 Liquid Glass Pill Tab Bar */}
+          {/* Invisible Dock Slot Anchor + iOS 27 Liquid Glass Pill Tab Bar */}
           <SafeAreaView
             edges={['bottom']}
             pointerEvents="box-none"
             style={styles.bottomDock}
           >
-            <MiniAudioPlayer
-              track={currentTrack}
-              isPlaying={Boolean(audioStatus.playing)}
-              progressRatio={progressRatio}
-              onTogglePlay={() => {
-                if (audioStatus.playing) player.pause();
-                else player.play();
-              }}
-              onNext={() => {
-                if (queueIdx + 1 < queue.length) {
-                  handlePlayFromQueue(queue, queueIdx + 1);
-                }
-              }}
-              onClose={() => {
-                player.pause();
-                setQueue([]);
-                setQueueIdx(-1);
-              }}
-            />
+            {Boolean(currentTrack) && (
+              <View style={styles.miniDockProbeOuter} pointerEvents="none">
+                <View
+                  ref={miniSlotRef}
+                  onLayout={measureMiniSlot}
+                  style={styles.miniDockProbe}
+                  pointerEvents="none"
+                />
+              </View>
+            )}
 
             <LiquidGlassTabBar
               tabs={dockTabs}
               activeTab={activeTab}
-              onSelectTab={(key) => switchTab(key)}
+              onSelectTab={handleSelectTab}
             />
           </SafeAreaView>
-        </SafeAreaView>
+
+          {/* Track Action Sheet (Playlist, Apple/Spotify/YT Music, Share, Dislike) */}
+          <TrackActionSheetModal
+            visible={Boolean(actionSheetState)}
+            track={actionSheetState?.track || null}
+            playlistName={actionSheetState?.playlistContext?.name}
+            onClose={() => setActionSheetState(null)}
+            onToggleFavorite={handleToggleFavorite}
+            onAddToPlaylist={(track) =>
+              setPlaylistPickerState({
+                tracks: [track],
+                suggestedName: '',
+                suggestedMood: track.mood,
+              })
+            }
+            onDislike={(track) => void handleDislikeTrack(track)}
+            onRemoveFromPlaylist={
+              actionSheetState?.playlistContext
+                ? async (track) => {
+                    const pl = actionSheetState.playlistContext;
+                    if (!pl) return;
+                    await removeTrackFromPlaylist(pl.id, user.id, track.id);
+                    setPlaylistsRefreshTick((t) => t + 1);
+                  }
+                : undefined
+            }
+          />
+
+          {/* Add to / Create Custom Playlist Modal */}
+          <PlaylistPickerModal
+            visible={Boolean(playlistPickerState)}
+            userId={user.id}
+            tracksToAdd={playlistPickerState?.tracks || []}
+            suggestedName={playlistPickerState?.suggestedName}
+            suggestedMood={playlistPickerState?.suggestedMood}
+            onClose={() => setPlaylistPickerState(null)}
+            onCompleted={(pl, added) => {
+              setPlaylistsRefreshTick((t) => t + 1);
+              if (added > 0) {
+                Alert.alert('Listeye Eklendi', `“${pl.name}” listesine ${added} şarkı eklendi.`);
+              } else {
+                Alert.alert('Zaten Listede', `Seçilen şarkılar zaten “${pl.name}” listesinde.`);
+              }
+            }}
+          />
+          </SafeAreaView>
+
+          {/* Unified Expanding Mini -> Full-Screen Audio Player */}
+          <ExpandableAudioPlayer
+            ref={playerSheetRef}
+            miniBarFrame={miniBarFrame}
+            player={player}
+            queue={queue}
+            queueIdx={queueIdx}
+            isPlaying={isAudioPlaying}
+            repeatOne={repeatOne}
+            onStopAndDismiss={handleStopAndDismiss}
+            onTogglePlay={handleTogglePlay}
+            onPrevious={handlePreviousTrack}
+            onNext={handleNextTrack}
+            onSeek={handleSeekTo}
+            onToggleRepeatOne={handleToggleRepeatOne}
+            onSelectQueueIndex={handleSelectQueueIndex}
+            onToggleFavorite={handleToggleFavorite}
+            onAddToPlaylist={handleAddPlayerTrackToPlaylist}
+            onDislike={handleDislikePlayerTrack}
+          />
+        </>
       )}
 
-      {showSplash && <AnimatedSplashScreen onFinish={() => setShowSplash(false)} />}
+      {showSplash && <AnimatedSplashScreen onFinish={handleSplashFinish} />}
     </View>
   );
 }
@@ -648,6 +1183,12 @@ const createStyles = (colors: ThemePalette) =>
     appSafe: {
       flex: 1,
       backgroundColor: colors.canvas,
+    },
+    tabPane: {
+      flex: 1,
+    },
+    tabPaneHidden: {
+      display: 'none',
     },
     topHeader: {
       flexDirection: 'row',
@@ -731,6 +1272,17 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 13.5,
       fontWeight: '800',
       color: colors.inkPrimary,
+    },
+    miniDockProbeOuter: {
+      width: '100%',
+      paddingHorizontal: 20,
+      marginBottom: -3,
+      alignItems: 'center',
+    },
+    miniDockProbe: {
+      width: '100%',
+      maxWidth: 376,
+      height: 62,
     },
     bottomDock: {
       position: 'absolute',

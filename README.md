@@ -2,7 +2,7 @@
 
 > **Tamamen Cihaz İçi Yapay Zeka (AffectNet ONNX + Apple Vision) • iOS 26/27 Liquid Glass Arayüz • Anlık Müzik Keşif Platformu**
 
-![Version](https://img.shields.io/badge/version-v2.1.0-FF6242?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v2.2.0-FF6242?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/iOS-26%20%2F%2027%20Liquid%20Glass-000000?style=for-the-badge&logo=apple)
 ![AI](https://img.shields.io/badge/On--Device%20AI-AffectNet%20ONNX%20%2B%20Apple%20Vision-22C55E?style=for-the-badge)
 

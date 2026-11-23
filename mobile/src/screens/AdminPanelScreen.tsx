@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -84,6 +84,8 @@ const SQL_PRESETS: Array<{ label: string; sql: string }> = [
 
 interface Props {
   currentUser: UserRecord;
+  isActiveTab?: boolean;
+  skipInitialEntrance?: boolean;
   onBack: () => void;
   onPlayTrack: (queue: TrackRecord[], index: number) => void;
   onDatabaseMutated: () => void;
@@ -135,6 +137,8 @@ function resolveEmotionVisualSafe(emotionOrMood: string, palette: ThemePalette) 
 
 export const AdminPanelScreen: React.FC<Props> = ({
   currentUser,
+  isActiveTab = true,
+  skipInitialEntrance = false,
   onBack,
   onPlayTrack,
   onDatabaseMutated,
@@ -146,17 +150,14 @@ export const AdminPanelScreen: React.FC<Props> = ({
 
   const [subTab, setSubTab] = useState<AdminSubTab>('overview');
   const [loading, setLoading] = useState(true);
-  const [refreshTick, setRefreshTick] = useState(0);
 
   // Overview + Lists
   const [overview, setOverview] = useState<AdminDatabaseOverview | null>(null);
   const [users, setUsers] = useState<AdminUserSummary[]>([]);
   const [scansState, setScansState] = useState<{
     rows: AdminScanSessionRecord[];
-    animTick: number;
   }>({
     rows: [],
-    animTick: 0,
   });
   const [scanFilterUserId, setScanFilterUserId] = useState<number | null>(null);
   const scansFilterMountedRef = useRef(false);
@@ -184,12 +185,10 @@ export const AdminPanelScreen: React.FC<Props> = ({
     table: BrowserTable;
     rows: Record<string, unknown>[];
     totalCount: number;
-    animTick: number;
   }>({
     table: 'users',
     rows: [],
     totalCount: 0,
-    animTick: 0,
   });
   const [favoriteLinks, setFavoriteLinks] = useState<AdminFavoriteRecord[]>([]);
   const [tableSearch, setTableSearch] = useState('');
@@ -208,43 +207,63 @@ export const AdminPanelScreen: React.FC<Props> = ({
   } | null>(null);
 
   // Sub-tab directional transition animation
-  const prevTabIdxRef = useRef(0);
+  const prevSubTabRef = useRef<AdminSubTab>(subTab);
   const contentOpacity = useRef(new Animated.Value(1)).current;
   const contentTranslateX = useRef(new Animated.Value(0)).current;
+  const subTabAnimRef = useRef<Animated.CompositeAnimation | null>(null);
 
   // Refresh button spin animation
   const spinAnim = useRef(new Animated.Value(0)).current;
+  const spinAnimRef = useRef<Animated.CompositeAnimation | null>(null);
 
   const switchSubTab = useCallback(
     (next: AdminSubTab) => {
       if (next === subTab) return;
-      const prevIdx = prevTabIdxRef.current;
-      const nextIdx = SUB_TAB_ORDER.indexOf(next);
-      const dir = nextIdx >= prevIdx ? 1 : -1;
-      prevTabIdxRef.current = nextIdx;
-
       setSubTab(next);
-      contentOpacity.setValue(0);
-      contentTranslateX.setValue(dir * 22);
-
-      Animated.parallel([
-        Animated.timing(contentOpacity, {
-          toValue: 1,
-          duration: 240,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.spring(contentTranslateX, {
-          toValue: 0,
-          damping: 20,
-          stiffness: 220,
-          mass: 0.75,
-          useNativeDriver: true,
-        }),
-      ]).start();
     },
-    [contentOpacity, contentTranslateX, subTab]
+    [subTab]
   );
+
+  useLayoutEffect(() => {
+    if (prevSubTabRef.current === subTab) return;
+    const prevIdx = SUB_TAB_ORDER.indexOf(prevSubTabRef.current);
+    const nextIdx = SUB_TAB_ORDER.indexOf(subTab);
+    const dir = nextIdx >= prevIdx ? 1 : -1;
+    prevSubTabRef.current = subTab;
+
+    subTabAnimRef.current?.stop();
+    contentOpacity.setValue(0.35);
+    contentTranslateX.setValue(dir * 28);
+
+    const anim = Animated.parallel([
+      Animated.timing(contentOpacity, {
+        toValue: 1,
+        duration: 200,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.spring(contentTranslateX, {
+        toValue: 0,
+        damping: 20,
+        stiffness: 210,
+        mass: 0.78,
+        useNativeDriver: true,
+      }),
+    ]);
+    subTabAnimRef.current = anim;
+    anim.start(({ finished }) => {
+      if (finished && subTabAnimRef.current === anim) {
+        subTabAnimRef.current = null;
+      }
+    });
+  }, [contentOpacity, contentTranslateX, subTab]);
+
+  useEffect(() => {
+    return () => {
+      subTabAnimRef.current?.stop();
+      spinAnimRef.current?.stop();
+    };
+  }, []);
 
   const loadTableData = useCallback(
     async (table: BrowserTable, prefsSnapshot?: Record<string, string>) => {
@@ -255,23 +274,21 @@ export const AdminPanelScreen: React.FC<Props> = ({
           const prefsObj = prefsSnapshot || overview?.prefs || {};
           const entries = Object.entries(prefsObj).map(([key, value]) => ({ key, value }));
           if (reqId !== tableRequestIdRef.current) return;
-          setTableState((prev) => ({
+          setTableState({
             table,
             rows: entries,
             totalCount: entries.length,
-            animTick: prev.animTick + 1,
-          }));
+          });
           setFavoriteLinks([]);
           return;
         }
         const inspected = await adminInspectTable(table, 60);
         if (reqId !== tableRequestIdRef.current) return;
-        setTableState((prev) => ({
+        setTableState({
           table,
           rows: inspected.rows,
           totalCount: inspected.totalCount,
-          animTick: prev.animTick + 1,
-        }));
+        });
 
         if (table === 'favorites') {
           const favs = await adminListFavorites(80);
@@ -294,13 +311,20 @@ export const AdminPanelScreen: React.FC<Props> = ({
   const loadAllAdminData = useCallback(async () => {
     const reqId = ++scanRequestIdRef.current;
     setLoading(true);
+    spinAnimRef.current?.stop();
     spinAnim.setValue(0);
-    Animated.timing(spinAnim, {
+    const spin = Animated.timing(spinAnim, {
       toValue: 1,
       duration: 520,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
-    }).start();
+    });
+    spinAnimRef.current = spin;
+    spin.start(({ finished }) => {
+      if (finished && spinAnimRef.current === spin) {
+        spinAnimRef.current = null;
+      }
+    });
 
     try {
       const [ov, userList, scanList] = await Promise.all([
@@ -311,12 +335,10 @@ export const AdminPanelScreen: React.FC<Props> = ({
       setOverview(ov);
       setUsers(userList);
       if (reqId === scanRequestIdRef.current) {
-        setScansState((prev) => ({
+        setScansState({
           rows: scanList,
-          animTick: prev.animTick + 1,
-        }));
+        });
       }
-      setRefreshTick((t) => t + 1);
       await loadTableData(activeTable, ov.prefs);
     } catch (err: any) {
       Alert.alert('Veri Yükleme Hatası', err?.message || 'Admin verileri yüklenemedi.');
@@ -345,10 +367,9 @@ export const AdminPanelScreen: React.FC<Props> = ({
     adminListAllScanSessions(100, scanFilterUserId)
       .then((rows) => {
         if (reqId !== scanRequestIdRef.current) return;
-        setScansState((prev) => ({
+        setScansState({
           rows,
-          animTick: prev.animTick + 1,
-        }));
+        });
       })
       .catch(() => {});
   }, [currentUser, scanFilterUserId]);
@@ -530,7 +551,13 @@ export const AdminPanelScreen: React.FC<Props> = ({
   }
 
   return (
-    <View style={styles.root}>
+    <StaggeredEntry
+      index={0}
+      active={isActiveTab}
+      enabled={!skipInitialEntrance}
+      distance={14}
+      style={styles.root}
+    >
       {/* Sticky Admin Header */}
       <View style={styles.stickyHeader}>
         <View style={styles.headerTopRow}>
@@ -634,13 +661,8 @@ export const AdminPanelScreen: React.FC<Props> = ({
                     icon: 'server-outline' as const,
                     accent: colors.brand,
                   },
-                ].map((kpi, idx) => (
-                  <StaggeredEntry
-                    key={kpi.label}
-                    index={idx}
-                    animationKey={`ov-${refreshTick}`}
-                    style={styles.kpiTile}
-                  >
+                ].map((kpi) => (
+                  <View key={kpi.label} style={styles.kpiTile}>
                     <View style={styles.kpiTop}>
                       <Text style={styles.kpiLabel}>{kpi.label}</Text>
                       <Ionicons name={kpi.icon} size={16} color={kpi.accent} />
@@ -649,12 +671,12 @@ export const AdminPanelScreen: React.FC<Props> = ({
                     <Text numberOfLines={1} style={styles.kpiSub}>
                       {kpi.sub}
                     </Text>
-                  </StaggeredEntry>
+                  </View>
                 ))}
               </View>
 
               {/* Emotion Breakdown */}
-              <StaggeredEntry index={6} animationKey={`ov-${refreshTick}`} style={styles.sectionCard}>
+              <View style={styles.sectionCard}>
                 <Text style={styles.cardTitle}>Duygu Analizi Dağılımı</Text>
                 <Text style={styles.cardSub}>
                   Tüm kullanıcıların kamera taramalarından elde edilen duygular
@@ -691,10 +713,10 @@ export const AdminPanelScreen: React.FC<Props> = ({
                     })}
                   </View>
                 )}
-              </StaggeredEntry>
+              </View>
 
               {/* Catalog Breakdown */}
-              <StaggeredEntry index={7} animationKey={`ov-${refreshTick}`} style={styles.sectionCard}>
+              <View style={styles.sectionCard}>
                 <Text style={styles.cardTitle}>Katalog Kaynak &amp; Dil Dağılımı</Text>
                 <View style={{ gap: 11, marginTop: 10 }}>
                   {overview.languageBreakdown.map((item, idx) => {
@@ -730,10 +752,10 @@ export const AdminPanelScreen: React.FC<Props> = ({
                     ))}
                   </View>
                 </View>
-              </StaggeredEntry>
+              </View>
 
               {/* System & Maintenance */}
-              <StaggeredEntry index={8} animationKey={`ov-${refreshTick}`} style={styles.sectionCard}>
+              <View style={styles.sectionCard}>
                 <Text style={styles.cardTitle}>Sistem &amp; Veritabanı Bakımı</Text>
                 <Text style={styles.infoMiniLabel}>AKTİF AI MOTORU</Text>
                 <Text style={styles.infoMiniVal}>{engineInfo.label}</Text>
@@ -770,7 +792,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
                     <Text style={styles.maintDangerText}>Tüm Veritabanını Sıfırla</Text>
                   </SpringPressable>
                 </View>
-              </StaggeredEntry>
+              </View>
             </View>
           )}
 
@@ -843,13 +865,11 @@ export const AdminPanelScreen: React.FC<Props> = ({
                 </StaggeredEntry>
               )}
 
-              {users.map((u, idx) => {
+              {users.map((u) => {
                 const isAdm = u.role === 'admin' || u.username.toLowerCase() === 'haluk';
                 return (
-                  <StaggeredEntry
+                  <View
                     key={u.id}
-                    index={idx}
-                    animationKey={`usr-${refreshTick}`}
                     style={[styles.userCard, isAdm && styles.userCardAdmin]}
                   >
                     <View style={styles.userCardTop}>
@@ -928,7 +948,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
                         </SpringPressable>
                       )}
                     </View>
-                  </StaggeredEntry>
+                  </View>
                 );
               })}
             </View>
@@ -985,15 +1005,11 @@ export const AdminPanelScreen: React.FC<Props> = ({
                   </Text>
                 </View>
               ) : (
-                scansState.rows.map((scan, idx) => {
+                scansState.rows.map((scan) => {
                   const vis = resolveMoodVisual(scan.mood, scan.emotion, colors);
                   const mirrored = scan.deviceLabel.toLowerCase().includes('ön kamera');
                   return (
-                    <StaggeredEntry
-                      key={scan.id}
-                      index={idx}
-                      animationKey={`scn-${scansState.animTick}`}
-                    >
+                    <View key={scan.id}>
                       <SpringPressable
                         haptic
                         scaleTo={0.98}
@@ -1039,7 +1055,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
                           <Ionicons name="trash-outline" size={17} color={colors.inkMuted} />
                         </SpringPressable>
                       </SpringPressable>
-                    </StaggeredEntry>
+                    </View>
                   );
                 })
               )}
@@ -1140,10 +1156,8 @@ export const AdminPanelScreen: React.FC<Props> = ({
                         ? String(row.key)
                         : `Satır ${idx + 1}`;
                   return (
-                    <StaggeredEntry
+                    <View
                       key={`${tableState.table}-${idx}`}
-                      index={Math.min(idx, 8)}
-                      animationKey={`tbl-${tableState.table}-${tableState.animTick}`}
                       style={styles.dbRowCard}
                     >
                       <View style={styles.dbRowHeader}>
@@ -1179,7 +1193,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
                           </Text>
                         </View>
                       ))}
-                    </StaggeredEntry>
+                    </View>
                   );
                 })
               )}
@@ -1391,7 +1405,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
           </View>
         </View>
       </Modal>
-    </View>
+    </StaggeredEntry>
   );
 };
 

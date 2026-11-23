@@ -35,7 +35,7 @@ interface LiquidGlassTabBarProps<T extends string> {
   onSelectTab: (tab: T) => void;
 }
 
-export function LiquidGlassTabBar<T extends string>({
+function LiquidGlassTabBarInner<T extends string>({
   tabs,
   activeTab,
   onSelectTab,
@@ -54,6 +54,16 @@ export function LiquidGlassTabBar<T extends string>({
     [tabs]
   );
 
+  const handleNativeSelectTab = useCallback(
+    (e: { nativeEvent?: { key?: string } }) => {
+      const selectedKey = e?.nativeEvent?.key as T | undefined;
+      if (selectedKey) {
+        onSelectTab(selectedKey);
+      }
+    },
+    [onSelectTab]
+  );
+
   if (NativeMoodSyncLiquidTabBar) {
     return (
       <View style={nativeWrapperStyles.outer} pointerEvents="box-none">
@@ -62,12 +72,7 @@ export function LiquidGlassTabBar<T extends string>({
           activeTab={activeTab}
           isDark={isDark}
           accentColor={colors.brand}
-          onSelectTab={(e) => {
-            const selectedKey = e?.nativeEvent?.key as T | undefined;
-            if (selectedKey) {
-              onSelectTab(selectedKey);
-            }
-          }}
+          onSelectTab={handleNativeSelectTab}
           style={nativeWrapperStyles.nativeBar}
         />
       </View>
@@ -82,6 +87,10 @@ export function LiquidGlassTabBar<T extends string>({
     />
   );
 }
+
+export const LiquidGlassTabBar = React.memo(
+  LiquidGlassTabBarInner
+) as typeof LiquidGlassTabBarInner;
 
 const nativeWrapperStyles = StyleSheet.create({
   outer: {

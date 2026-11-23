@@ -1,5 +1,32 @@
 # Değişiklikler (Changelog)
 
+## v2.2.0 — 23 Kasım 2026
+
+### Genişleyebilir Liquid Glass Mini & Tam Ekran Müzik Oynatıcı (`ExpandableAudioPlayer.tsx`, `MoodSyncVisionModule.swift`)
+- **Tek Kapsül Morph Animasyonu:** Alt mini çubuktan yukarıya doğrudan büyüyen ve küçülen kesintisiz oynatıcı geçişi eklendi; tek dokunuşla açılma ve parmak hızı/ivmesine duyarlı 120Hz kapatma desteği sağlandı.
+- **Kesintisiz Etkileşim & Optimizasyon:** Animasyon tamamlanmadan parmakla yakalayıp geri küçültme/büyütme etkileşimi düzeltildi; animasyon sırasındaki gereksiz arka plan yuvarlak efekti ve takılmalar kaldırıldı.
+- **Tam Ekran Kontroller & Kilit Ekranı:** Sarma çubuğu (scrubbing), tek parça tekrar modu, çalma sırası yönetimi ve `MPRemoteCommandCenter` üzerinden iOS Kilit Ekranı / Denetim Merkezi ileri-geri parça kontrolleri eklendi.
+
+### Hesaba Bağlı Face ID & Güvenlik (`MoodSyncVisionModule.swift`, `LoginScreen.tsx`, `SettingsScreen.tsx`)
+- **Keychain Tabanlı Biyometrik Giriş:** `LocalAuthentication` + iOS Keychain (`.biometryCurrentSet`) ile seçili hesaba özel şifresiz Face ID girişi eklendi; cihaza yeni yüz eklendiğinde güvenlik gereği eşleştirme otomatik sıfırlanır.
+- **Hesap Güvenliği Yönetimi:** Ayarlar ekranından Face ID eşleştirme, kaldırma ve admin hesaba devralma kontrolleri (`NSFaceIDUsageDescription`) eklendi.
+
+### Özel Çalma Listeleri, Mod Stratejisi & Tarama Günlüğü (`LibraryScreen.tsx`, `EmotionBreakdownCard.tsx`, `ScanJournalCard.tsx`, `TrackActionSheetModal.tsx`)
+- **Özel Çalma Listeleri:** `Şarkılar` / `Listelerim` geçişi, liste oluşturma, yeniden adlandırma, silme, 4'lü mozaik kapak görünümü ve liste paylaşımı (`PlaylistPickerModal.tsx`) eklendi.
+- **Mod Stratejisi & Çoklu Duygu Analizi:** *Moduma Eşlik Et* / *Modumu Yükselt* seçimi, duygu olasılık çubuğu ve manuel duygu düzeltme desteği hem canlı taramaya hem geçmiş detayına eklendi.
+- **Tarama Günlüğü & Parça Aksiyonları:** Taramalara not ve hızlı bağlam etiketleri ekleme (`ScanJournalCard`), parçaları Apple Music / Spotify / YouTube Music’te açma, *"Bir Daha Önerme"* ile gizleme/geri alma ve kişiselleştirilmiş öneri sıralaması getirildi.
+
+### Müzik Veritabanı & Dil Sınıflandırma İyileştirmeleri (`onlineMusicService.ts`, `iosDatabase.ts`, `LibraryScreen.tsx`)
+- **Katı Türkçe / Yabancı Ayrımı:** Türkçe listede ADÉLA gibi yabancı sanatçıların görünmesine yol açan sınıflandırma hatası `classifyTrackLanguage` ile giderildi; açılışta `repairTrackLanguagesInDatabase` ile mevcut SQLite veritabanı otomatik onarılıyor.
+- **30'lu Sayfalandırma & Arka Plan Zenginleştirme:** Kütüphanede sayfa başına 30 şarkı gösterimi, sayfalar arası geçiş ve `ensureRichCatalogSeeded` ile katalog doldurma eklendi.
+
+### Animasyon, Dokunma & Performans Düzeltmeleri (`MotionPrimitives.tsx`, `TrackRow.tsx`, `App.tsx`, `HistoryScreen.tsx`)
+- **Sekme Geçişi Çift Animasyon & Race Düzeltmesi:** Çakışan dış sekme animasyonu kaldırıldı, `HistoryScreen` senkron `ScrollView`’a taşındı ve `StaggeredEntry` tek `progress` `Animated.Value` + `delay: 0` gömülü eğri + `queueMicrotask` sıfırlama korumasıyla güncellenerek hızlı sekme geçişlerindeki çift tetiklenme tamamen giderildi.
+- **Tam Kart Dokunma Alanı:** `TrackRow` kartı köşeler ve kenar boşlukları dahil tek `Pressable` haline getirildi; aksiyon butonlarına `e.stopPropagation()` ve `FlatList`’e `keyboardShouldPersistTaps="handled"` eklendi.
+- **Kararlılık Düzeltmeleri:** `AnimatedSplashScreen`, `AnimatedSegmentedControl`, `AnimatedProgressBar` ve `CameraStudioScreen` üzerindeki yeniden tetiklenme ve gereksiz render sorunları giderildi.
+
+---
+
 ## v2.1.0 — 21 Kasım 2026
 
 ### Hız & Doğruluk İyileştirmeleri (`MoodSyncVisionModule.swift`)

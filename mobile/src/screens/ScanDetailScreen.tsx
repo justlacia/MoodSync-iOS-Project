@@ -8,27 +8,42 @@ import {
   Modal,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { EmotionBreakdownCard } from '../components/EmotionBreakdownCard';
 import {
   AnimatedSegmentedControl,
   SpringPressable,
   StaggeredEntry,
 } from '../components/MotionPrimitives';
+import { ScanJournalCard } from '../components/ScanJournalCard';
 import { TrackRow } from '../components/TrackRow';
 import { ScanSessionRecord, TrackRecord } from '../database/iosDatabase';
-import { resolveMoodVisual, ThemePalette } from '../theme/colors';
+import { EmotionType, MoodStrategy, resolveMoodVisual, ThemePalette } from '../theme/colors';
 import { useTheme } from '../theme/ThemeContext';
 
 interface Props {
   session: ScanSessionRecord;
   playingTrackId: number | null;
   isAudioPlaying: boolean;
+  isActiveTab?: boolean;
+  skipInitialEntrance?: boolean;
   onBack: () => void;
   onPlayTrack: (queue: TrackRecord[], index: number) => void;
   onToggleFavorite: (trackId: number) => void;
+  onTrackMorePress: (track: TrackRecord) => void;
+  onUpdateMoodOrStrategy: (params: {
+    sessionId: number;
+    emotion?: EmotionType;
+    strategy?: MoodStrategy;
+    language?: 'all' | 'tr' | 'global';
+    isManualOverride?: boolean;
+  }) => Promise<void>;
+  onUpdateJournal: (sessionId: number, note: string, tags: string[]) => Promise<void>;
+  onSaveTracksToPlaylist: (tracks: TrackRecord[], suggestedName: string) => void;
   onExpandTracks: (
     sessionId: number,
     addCount: number,
@@ -43,9 +58,15 @@ export const ScanDetailScreen: React.FC<Props> = ({
   session,
   playingTrackId,
   isAudioPlaying,
+  isActiveTab = true,
+  skipInitialEntrance = false,
   onBack,
   onPlayTrack,
   onToggleFavorite,
+  onTrackMorePress,
+  onUpdateMoodOrStrategy,
+  onUpdateJournal,
+  onSaveTracksToPlaylist,
   onExpandTracks,
   onDeleteSession,
 }) => {
@@ -53,7 +74,9 @@ export const ScanDetailScreen: React.FC<Props> = ({
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [langFilter, setLangFilter] = useState<'all' | 'tr' | 'global'>('all');
+  const [langFilterAnimTick, setLangFilterAnimTick] = useState(0);
   const [expandingCount, setExpandingCount] = useState<number | null>(null);
+  const [updatingMood, setUpdatingMood] = useState(false);
   const [expandNotice, setExpandNotice] = useState<string | null>(null);
   const [photoModalVisible, setPhotoModalVisible] = useState(false);
   const [newlyAddedStartIndex, setNewlyAddedStartIndex] = useState<number | null>(null);
@@ -73,6 +96,7 @@ export const ScanDetailScreen: React.FC<Props> = ({
   // Reset per-session transient state when opening another scan
   useEffect(() => {
     setLangFilter('all');
+    setLangFilterAnimTick(0);
     setExpandNotice(null);
     setNewlyAddedStartIndex(null);
     pendingExpandRef.current = null;
@@ -147,6 +171,57 @@ export const ScanDetailScreen: React.FC<Props> = ({
   const meta = resolveMoodVisual(session.mood, session.emotion, colors);
   const mirrored = session.deviceLabel.toLowerCase().includes('ön kamera');
 
+  const handleStrategyChange = async (nextStrategy: MoodStrategy) => {
+    if (updatingMood) return;
+    setUpdatingMood(true);
+    try {
+      await onUpdateMoodOrStrategy({
+        sessionId: session.id,
+        strategy: nextStrategy,
+        language: langFilter,
+      });
+      showToast(
+        nextStrategy === 'uplift'
+          ? 'Modunu yükselten yeni şarkı listesi hazırlandı.'
+          : 'Mevcut moduna eşlik eden şarkılar güncellendi.'
+      );
+    } finally {
+      setUpdatingMood(false);
+    }
+  };
+
+  const handleEmotionChange = async (nextEmotion: EmotionType) => {
+    if (updatingMood) return;
+    setUpdatingMood(true);
+    try {
+      await onUpdateMoodOrStrategy({
+        sessionId: session.id,
+        emotion: nextEmotion,
+        language: langFilter,
+        isManualOverride: true,
+      });
+      const v = resolveMoodVisual(session.mood, nextEmotion, colors);
+      showToast(`Duygu “${v.shortTr}” olarak güncellendi ve liste yenilendi.`);
+    } finally {
+      setUpdatingMood(false);
+    }
+  };
+
+  const handleShareList = async () => {
+    Haptics.selectionAsync().catch(() => {});
+    const tracksToShare = visibleTracks.length > 0 ? visibleTracks : allTracks;
+    const lines = tracksToShare
+      .slice(0, 12)
+      .map((t, i) => `${i + 1}. ${t.title} — ${t.artist}`);
+    try {
+      await Share.share({
+        message: `🎧 MoodSync (${meta.fullTr})\n\n${lines.join('\n')}`,
+      });
+    } catch {
+      // Cancelled
+    }
+  };
+
   const formatDateTR = (iso: string) => {
     try {
       return new Date(iso).toLocaleDateString('tr-TR', {
@@ -195,7 +270,13 @@ export const ScanDetailScreen: React.FC<Props> = ({
         </View>
 
         {/* Hero Photo & Mood Summary */}
-        <StaggeredEntry index={0} animationKey={session.id} style={styles.heroCard}>
+        <StaggeredEntry
+          index={0}
+          animationKey={session.id}
+          active={isActiveTab}
+          enabled={!skipInitialEntrance}
+          style={styles.heroCard}
+        >
           <SpringPressable
             haptic
             scaleTo={0.96}
@@ -236,12 +317,69 @@ export const ScanDetailScreen: React.FC<Props> = ({
           </View>
         </StaggeredEntry>
 
+        {/* Strategy Toggle + Emotion Breakdown + Manual Override */}
+        <StaggeredEntry
+          index={1}
+          animationKey={session.id}
+          active={isActiveTab}
+          enabled={!skipInitialEntrance}
+        >
+          <EmotionBreakdownCard
+            mood={session.mood}
+            emotion={session.emotion}
+            emotionScores={session.emotionScores}
+            strategy={session.moodStrategy || 'match'}
+            isManualOverride={session.isManualOverride}
+            updating={updatingMood}
+            onChangeStrategy={handleStrategyChange}
+            onChangeEmotion={handleEmotionChange}
+          />
+        </StaggeredEntry>
+
+        {/* Quick Save to Playlist & Share Row */}
+        <View style={styles.bulkActionsRow}>
+          <SpringPressable
+            haptic
+            onPress={() =>
+              onSaveTracksToPlaylist(
+                visibleTracks.length > 0 ? visibleTracks : allTracks,
+                `${meta.shortTr} Modum`
+              )
+            }
+            style={styles.bulkBtn}
+          >
+            <Ionicons name="albums-outline" size={15} color={colors.brand} />
+            <Text style={styles.bulkBtnText}>Çalma Listesi Yap</Text>
+          </SpringPressable>
+
+          <SpringPressable haptic onPress={handleShareList} style={styles.bulkBtnSecondary}>
+            <Ionicons name="share-outline" size={15} color={colors.inkPrimary} />
+            <Text style={styles.bulkBtnSecondaryText}>Listeyi Paylaş</Text>
+          </SpringPressable>
+        </View>
+
+        {/* Journal Note & Tags */}
+        <ScanJournalCard
+          initialNote={session.note || ''}
+          initialTags={session.tags || []}
+          onSave={(note, tags) => onUpdateJournal(session.id, note, tags)}
+        />
+
         {/* Filter + Quick +8 Expand Toolbar */}
-        <StaggeredEntry index={1} animationKey={session.id} style={styles.toolbar}>
+        <StaggeredEntry
+          index={2}
+          animationKey={session.id}
+          active={isActiveTab}
+          enabled={!skipInitialEntrance}
+          style={styles.toolbar}
+        >
           <AnimatedSegmentedControl<'all' | 'tr' | 'global'>
             compact
             value={langFilter}
-            onChange={setLangFilter}
+            onChange={(next) => {
+              setLangFilter(next);
+              setLangFilterAnimTick((t) => t + 1);
+            }}
             options={[
               { key: 'all', label: 'Tümü' },
               { key: 'tr', label: 'Türkçe' },
@@ -299,28 +437,43 @@ export const ScanDetailScreen: React.FC<Props> = ({
               </SpringPressable>
             </View>
           ) : (
-            visibleTracks.map((tr, idx) => (
-              <TrackRow
-                key={`${session.id}-${tr.id}`}
-                track={tr}
-                index={idx}
-                staggerIndex={
-                  newlyAddedStartIndex !== null && idx >= newlyAddedStartIndex
-                    ? idx - newlyAddedStartIndex
-                    : idx
-                }
-                animationKey={`${session.id}-${langFilter}`}
-                isActiveTrack={playingTrackId === tr.id}
-                isPlaying={playingTrackId === tr.id && isAudioPlaying}
-                onPlayPress={() => onPlayTrack(visibleTracks, idx)}
-                onToggleFavorite={() => onToggleFavorite(tr.id)}
-              />
-            ))
+            visibleTracks.map((tr, idx) => {
+              const rowAnimKey =
+                newlyAddedStartIndex !== null && idx >= newlyAddedStartIndex
+                  ? `exp-${session.id}-${newlyAddedStartIndex}`
+                  : langFilterAnimTick > 0
+                    ? `flt-${session.id}-${langFilterAnimTick}`
+                    : undefined;
+              return (
+                <TrackRow
+                  key={`${session.id}-${tr.id}`}
+                  track={tr}
+                  index={idx}
+                  staggerIndex={
+                    newlyAddedStartIndex !== null && idx >= newlyAddedStartIndex
+                      ? idx - newlyAddedStartIndex
+                      : idx
+                  }
+                  animationKey={rowAnimKey}
+                  isActiveTrack={playingTrackId === tr.id}
+                  isPlaying={playingTrackId === tr.id && isAudioPlaying}
+                  onPlayPress={() => onPlayTrack(visibleTracks, idx)}
+                  onToggleFavorite={() => onToggleFavorite(tr.id)}
+                  onMorePress={() => onTrackMorePress(tr)}
+                />
+              );
+            })
           )}
         </View>
 
         {/* Dedicated Expand Playlist Card */}
-        <StaggeredEntry index={2} animationKey={session.id} style={styles.expandCard}>
+        <StaggeredEntry
+          index={3}
+          animationKey={session.id}
+          active={isActiveTab}
+          enabled={!skipInitialEntrance}
+          style={styles.expandCard}
+        >
           <View style={styles.expandHeader}>
             <View style={styles.expandIconCircle}>
               <Ionicons name="musical-notes" size={18} color={colors.brand} />
@@ -588,6 +741,45 @@ const createStyles = (colors: ThemePalette) =>
     },
     toastText: {
       flex: 1,
+      fontSize: 12.5,
+      fontWeight: '700',
+      color: colors.inkPrimary,
+    },
+    bulkActionsRow: {
+      flexDirection: 'row',
+      gap: 8,
+      marginBottom: 12,
+    },
+    bulkBtn: {
+      flex: 1.1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      backgroundColor: colors.brandSoft,
+      borderWidth: 1,
+      borderColor: colors.brand,
+      paddingVertical: 10,
+      borderRadius: 13,
+    },
+    bulkBtnText: {
+      fontSize: 12.5,
+      fontWeight: '800',
+      color: colors.brand,
+    },
+    bulkBtnSecondary: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.hairlineStrong,
+      paddingVertical: 10,
+      borderRadius: 13,
+    },
+    bulkBtnSecondaryText: {
       fontSize: 12.5,
       fontWeight: '700',
       color: colors.inkPrimary,

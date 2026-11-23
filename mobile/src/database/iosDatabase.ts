@@ -1,10 +1,29 @@
 import * as Crypto from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as SQLite from 'expo-sqlite';
-import { excludeAppDataFromBackup } from '../../modules/moodsync-vision';
+import {
+  authenticateBiometricToken,
+  clearBiometricToken,
+  enrollBiometricToken,
+  excludeAppDataFromBackup,
+  hasBiometricToken,
+} from '../../modules/moodsync-vision';
 import { analyzeCameraFrame } from '../services/moodAiService';
-import { fetchOnlineTracksDirect, OnlineTrackPayload } from '../services/onlineMusicService';
-import { emotionToMood, EmotionType, MoodType } from '../theme/colors';
+import {
+  classifyTrackLanguage,
+  fetchOnlineTracksDirect,
+  normalizeMusicText,
+  OnlineTrackPayload,
+} from '../services/onlineMusicService';
+import {
+  ALL_EMOTIONS,
+  EmotionScores,
+  emotionToMood,
+  EmotionType,
+  MoodStrategy,
+  MoodType,
+  resolveTargetMoodForStrategy,
+} from '../theme/colors';
 
 export type UserRole = 'admin' | 'user';
 
@@ -53,7 +72,10 @@ export type AdminTableName =
   | 'scan_sessions'
   | 'tracks'
   | 'favorites'
-  | 'scan_session_tracks';
+  | 'scan_session_tracks'
+  | 'disliked_tracks'
+  | 'playlists'
+  | 'playlist_tracks';
 
 export interface AdminDatabaseOverview {
   userCount: number;
@@ -99,11 +121,41 @@ export interface ScanSessionRecord {
   mood: MoodType;
   emotion?: EmotionType | null;
   confidence: number;
+  emotionScores?: EmotionScores | null;
+  note?: string;
+  tags?: string[];
+  moodStrategy?: MoodStrategy;
+  isManualOverride?: boolean;
   snapshotUri: string | null;
   deviceLabel: string;
   trackCount: number;
   createdAt: string;
   tracks?: TrackRecord[];
+}
+
+export interface PlaylistRecord {
+  id: number;
+  userId: number;
+  name: string;
+  description: string;
+  mood: MoodType | null;
+  colorHex: string | null;
+  trackCount: number;
+  coverArtworks: string[];
+  createdAt: string;
+  updatedAt: string;
+  tracks?: TrackRecord[];
+}
+
+export interface BiometricBindingInfo {
+  userId: number;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  enabledAt: string;
+  appLockEnabled: boolean;
+  adminLockEnabled: boolean;
+  keychainPresent: boolean;
 }
 
 export interface DashboardStats {
@@ -329,14 +381,67 @@ async function initDatabaseInternal(): Promise<SQLite.SQLiteDatabase> {
       FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS disliked_tracks (
+      user_id INTEGER NOT NULL,
+      track_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, track_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS playlists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      mood TEXT,
+      color_hex TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS playlist_tracks (
+      playlist_id INTEGER NOT NULL,
+      track_id INTEGER NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      added_at TEXT NOT NULL,
+      PRIMARY KEY (playlist_id, track_id),
+      FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+      FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tracks_mood_lang ON tracks(mood, language);
     CREATE INDEX IF NOT EXISTS idx_scans_user_created ON scan_sessions(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_disliked_user ON disliked_tracks(user_id);
+    CREATE INDEX IF NOT EXISTS idx_playlists_user ON playlists(user_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist ON playlist_tracks(playlist_id, position ASC);
   `);
 
   // Safe migration for existing databases lacking users.role
   const userCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(users)');
   if (!userCols.some((c) => c.name === 'role')) {
     await db.execAsync("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';");
+  }
+
+  // Safe migration for scan_sessions (emotion breakdown, journal, strategy, manual override)
+  const scanCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(scan_sessions)');
+  const scanColNames = new Set(scanCols.map((c) => c.name));
+  if (!scanColNames.has('emotion_scores_json')) {
+    await db.execAsync('ALTER TABLE scan_sessions ADD COLUMN emotion_scores_json TEXT;');
+  }
+  if (!scanColNames.has('note')) {
+    await db.execAsync("ALTER TABLE scan_sessions ADD COLUMN note TEXT NOT NULL DEFAULT '';");
+  }
+  if (!scanColNames.has('tags_json')) {
+    await db.execAsync("ALTER TABLE scan_sessions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';");
+  }
+  if (!scanColNames.has('mood_strategy')) {
+    await db.execAsync("ALTER TABLE scan_sessions ADD COLUMN mood_strategy TEXT NOT NULL DEFAULT 'match';");
+  }
+  if (!scanColNames.has('is_manual_override')) {
+    await db.execAsync('ALTER TABLE scan_sessions ADD COLUMN is_manual_override INTEGER NOT NULL DEFAULT 0;');
   }
 
   // Remove legacy demo account and ensure default admin account (haluk / haluk) exists locally
@@ -360,10 +465,19 @@ async function initDatabaseInternal(): Promise<SQLite.SQLiteDatabase> {
   dbInstance = db;
   excludeAppDataFromBackup();
 
-  // Kick off initial background catalog warm-up if empty (non-blocking)
-  const countRow = await db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM tracks');
-  if (!countRow || countRow.cnt < 18) {
-    ensureInitialCatalogSeeded().catch(() => {});
+  // Re-audit persisted track languages cleanly without deleting user favorites/playlists
+  await repairTrackLanguagesInDatabase(db);
+
+  // Kick off initial background catalog warm-up if catalog or Turkish catalog is small (non-blocking)
+  const countRow = await db.getFirstAsync<{ total: number; trCount: number; globalCount: number }>(
+    `SELECT
+      COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN language = 'tr' THEN 1 ELSE 0 END), 0) AS trCount,
+      COALESCE(SUM(CASE WHEN language = 'global' THEN 1 ELSE 0 END), 0) AS globalCount
+    FROM tracks`
+  );
+  if (!countRow || countRow.total < 180 || countRow.trCount < 90 || countRow.globalCount < 80) {
+    ensureRichCatalogSeeded(180).catch(() => {});
   }
 
   return db;
@@ -379,9 +493,11 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
 
 /**
  * Completely wipes all local data inside the app sandbox (SQLite DB, all captured photos,
- * user sessions, preferences, and temporary caches).
+ * user sessions, preferences, Keychain biometric token, and temporary caches).
  */
 export async function wipeAllLocalData(): Promise<void> {
+  clearBiometricToken();
+
   if (dbInstance) {
     try {
       await dbInstance.closeAsync();
@@ -445,7 +561,64 @@ export async function getSandboxStorageSummary(): Promise<{
   };
 }
 
-// ───────────────────────── Mappers ─────────────────────────
+// ───────────────────────── Mappers & Safe Parsers ─────────────────────────
+
+function parseEmotionScoresJson(raw: unknown): EmotionScores | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const out: EmotionScores = {
+      happy: 0,
+      surprise: 0,
+      neutral: 0,
+      sad: 0,
+      angry: 0,
+    };
+    let hasPositive = false;
+    for (const em of ALL_EMOTIONS) {
+      const val = Number((parsed as Record<string, unknown>)[em] ?? 0);
+      if (Number.isFinite(val) && val > 0) {
+        out[em] = val;
+        hasPositive = true;
+      }
+    }
+    return hasPositive ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseTagsJson(raw: unknown): string[] {
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((t) => String(t).trim()).filter(Boolean).slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+function mapScanSessionFields(r: any): Omit<ScanSessionRecord, 'tracks'> {
+  const rawStrategy = String(r.mood_strategy || 'match');
+  return {
+    id: Number(r.id),
+    userId: Number(r.user_id),
+    mood: (r.mood as MoodType) || 'neutral',
+    emotion: (r.emotion as EmotionType) || null,
+    confidence: Number(r.confidence || 0),
+    emotionScores: parseEmotionScoresJson(r.emotion_scores_json),
+    note: typeof r.note === 'string' ? r.note : '',
+    tags: parseTagsJson(r.tags_json),
+    moodStrategy: rawStrategy === 'uplift' ? 'uplift' : 'match',
+    isManualOverride: Boolean(r.is_manual_override),
+    snapshotUri: r.snapshot_uri || null,
+    deviceLabel: String(r.device_label || 'iPhone 16 Pro'),
+    trackCount: Number(r.track_count ?? 0),
+    createdAt: String(r.created_at),
+  };
+}
 
 function mapTrackRow(row: any): TrackRecord {
   return {
@@ -571,7 +744,266 @@ export async function logoutActiveUser(): Promise<void> {
   await setSetting('active_user_id', null);
 }
 
+// ───────────────────────── Account-Bound Face ID (Keychain + .biometryCurrentSet) ─────────────────────────
+
+const PREF_BIO_USER_ID = 'biometric_user_id';
+const PREF_BIO_USERNAME = 'biometric_username';
+const PREF_BIO_DISPLAY_NAME = 'biometric_display_name';
+const PREF_BIO_ROLE = 'biometric_user_role';
+const PREF_BIO_ENABLED_AT = 'biometric_enabled_at';
+const PREF_BIO_TOKEN_HASH = 'biometric_token_hash';
+const PREF_BIO_APP_LOCK = 'biometric_app_lock';
+const PREF_BIO_ADMIN_LOCK = 'biometric_admin_lock';
+
+async function hashBiometricToken(token: string): Promise<string> {
+  return Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    `moodsync_bio_v1::${token}`
+  );
+}
+
+export async function disableBiometricBinding(): Promise<void> {
+  clearBiometricToken();
+  const next = { ...readPrefs() };
+  delete next[PREF_BIO_USER_ID];
+  delete next[PREF_BIO_USERNAME];
+  delete next[PREF_BIO_DISPLAY_NAME];
+  delete next[PREF_BIO_ROLE];
+  delete next[PREF_BIO_ENABLED_AT];
+  delete next[PREF_BIO_TOKEN_HASH];
+  delete next[PREF_BIO_APP_LOCK];
+  delete next[PREF_BIO_ADMIN_LOCK];
+  writePrefs(next);
+}
+
+export async function getBiometricBinding(): Promise<BiometricBindingInfo | null> {
+  const prefs = readPrefs();
+  const rawUid = prefs[PREF_BIO_USER_ID];
+  const tokenHash = prefs[PREF_BIO_TOKEN_HASH];
+  if (!rawUid || !tokenHash) return null;
+
+  const uid = Number(rawUid);
+  if (!Number.isFinite(uid) || uid <= 0) {
+    await disableBiometricBinding();
+    return null;
+  }
+
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<any>(
+    'SELECT id, username, display_name, role FROM users WHERE id = ?',
+    [uid]
+  );
+  if (!row) {
+    await disableBiometricBinding();
+    return null;
+  }
+
+  const uname = String(row.username);
+  return {
+    userId: Number(row.id),
+    username: uname,
+    displayName: String(row.display_name || uname),
+    role: resolveRole(uname, row.role),
+    enabledAt: prefs[PREF_BIO_ENABLED_AT] || '',
+    appLockEnabled: false,
+    adminLockEnabled: false,
+    keychainPresent: hasBiometricToken(),
+  };
+}
+
+export async function enableBiometricBindingForUser(
+  user: UserRecord,
+  options?: { appLockEnabled?: boolean; adminLockEnabled?: boolean }
+): Promise<{ ok: boolean; binding?: BiometricBindingInfo; cancelled?: boolean; error?: string }> {
+  const randomBytes = Crypto.getRandomBytes(32);
+  let token = '';
+  for (let i = 0; i < randomBytes.length; i++) {
+    token += randomBytes[i].toString(16).padStart(2, '0');
+  }
+
+  const enrollRes = await enrollBiometricToken(
+    token,
+    `Face ID’yi @${user.username} hesabıyla eşleştirmek için doğrulayın`
+  );
+  if (!enrollRes.success) {
+    return {
+      ok: false,
+      cancelled: enrollRes.cancelled,
+      error: enrollRes.error || 'Face ID eşleştirmesi tamamlanamadı.',
+    };
+  }
+
+  const tokenHash = await hashBiometricToken(token);
+  const now = new Date().toISOString();
+  const appLock = options?.appLockEnabled ?? false;
+  const adminLock = options?.adminLockEnabled ?? false;
+
+  const next = { ...readPrefs() };
+  next[PREF_BIO_USER_ID] = String(user.id);
+  next[PREF_BIO_USERNAME] = user.username;
+  next[PREF_BIO_DISPLAY_NAME] = user.displayName;
+  next[PREF_BIO_ROLE] = user.role;
+  next[PREF_BIO_ENABLED_AT] = now;
+  next[PREF_BIO_TOKEN_HASH] = tokenHash;
+  next[PREF_BIO_APP_LOCK] = appLock ? '1' : '0';
+  next[PREF_BIO_ADMIN_LOCK] = adminLock ? '1' : '0';
+  writePrefs(next);
+
+  const binding = await getBiometricBinding();
+  return { ok: true, binding: binding || undefined };
+}
+
+export async function updateBiometricLockOptions(opts: {
+  appLockEnabled?: boolean;
+  adminLockEnabled?: boolean;
+}): Promise<BiometricBindingInfo | null> {
+  const next = { ...readPrefs() };
+  if (opts.appLockEnabled !== undefined) {
+    next[PREF_BIO_APP_LOCK] = opts.appLockEnabled ? '1' : '0';
+  }
+  if (opts.adminLockEnabled !== undefined) {
+    next[PREF_BIO_ADMIN_LOCK] = opts.adminLockEnabled ? '1' : '0';
+  }
+  writePrefs(next);
+  return getBiometricBinding();
+}
+
+export async function authenticateWithBiometric(reason?: string): Promise<{
+  user: UserRecord | null;
+  cancelled?: boolean;
+  invalidated?: boolean;
+  error?: string;
+}> {
+  const binding = await getBiometricBinding();
+  if (!binding) {
+    return { user: null, error: 'Face ID ile eşleştirilmiş hesap bulunamadı.' };
+  }
+
+  const expectedHash = readPrefs()[PREF_BIO_TOKEN_HASH];
+  const authRes = await authenticateBiometricToken(
+    reason || 'MoodSync hesabınıza giriş yapmak için Face ID doğrulayın'
+  );
+
+  if (authRes.invalidated) {
+    await disableBiometricBinding();
+    return {
+      user: null,
+      invalidated: true,
+      error:
+        authRes.error ||
+        'Cihazın Face ID ayarları değiştiği için eşleştirme güvenlik nedeniyle sıfırlandı.',
+    };
+  }
+
+  if (!authRes.success || !authRes.token) {
+    return {
+      user: null,
+      cancelled: authRes.cancelled,
+      error: authRes.error || 'Face ID doğrulaması başarısız oldu.',
+    };
+  }
+
+  const actualHash = await hashBiometricToken(authRes.token);
+  if (!expectedHash || actualHash !== expectedHash) {
+    return { user: null, error: 'Face ID oturum anahtarı doğrulanamadı.' };
+  }
+
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<any>(
+    'SELECT id, username, display_name, role, created_at FROM users WHERE id = ?',
+    [binding.userId]
+  );
+  if (!row) {
+    await disableBiometricBinding();
+    return { user: null, error: 'Eşleştirilen hesap artık mevcut değil.' };
+  }
+
+  const uname = String(row.username);
+  const role = resolveRole(uname, row.role);
+  await setSetting('active_user_id', String(row.id));
+
+  return {
+    user: {
+      id: Number(row.id),
+      username: uname,
+      displayName: String(row.display_name || uname),
+      role,
+      createdAt: String(row.created_at),
+    },
+  };
+}
+
 // ───────────────────────── On-Device Music Catalog & iTunes/Deezer Sync ─────────────────────────
+
+const PREF_TRACK_LANG_AUDIT_VERSION = 'track_lang_audit_version';
+const CURRENT_TRACK_LANG_AUDIT_VERSION = '2';
+
+async function repairTrackLanguagesInDatabase(db: SQLite.SQLiteDatabase): Promise<number> {
+  try {
+    const prefs = readPrefs();
+    if (prefs[PREF_TRACK_LANG_AUDIT_VERSION] === CURRENT_TRACK_LANG_AUDIT_VERSION) {
+      return 0;
+    }
+
+    const rows = await db.getAllAsync<{
+      id: number;
+      title: string;
+      artist: string;
+      album: string | null;
+      genre: string | null;
+      language: string | null;
+    }>('SELECT id, title, artist, album, genre, language FROM tracks');
+
+    const languageUpdates: Array<{ id: number; language: 'tr' | 'global'; genre?: string }> = [];
+    for (const row of rows) {
+      const currentLang: 'tr' | 'global' = row.language === 'tr' ? 'tr' : 'global';
+      const detectedLang = classifyTrackLanguage({
+        artist: row.artist,
+        title: row.title,
+        album: row.album || '',
+        genre: row.genre || '',
+        fallbackLanguage: currentLang,
+      });
+
+      const normGenre = normalizeMusicText(row.genre || '');
+      const isPollutedTurkishGenre =
+        detectedLang === 'global' &&
+        (normGenre === 'turkce' || normGenre === 'turkish' || normGenre === 'turkce pop');
+
+      if (detectedLang !== currentLang || isPollutedTurkishGenre) {
+        languageUpdates.push({
+          id: row.id,
+          language: detectedLang,
+          genre: isPollutedTurkishGenre ? 'Pop' : undefined,
+        });
+      }
+    }
+
+    if (languageUpdates.length > 0) {
+      await db.withTransactionAsync(async () => {
+        for (const upd of languageUpdates) {
+          if (upd.genre) {
+            await db.runAsync('UPDATE tracks SET language = ?, genre = ? WHERE id = ?', [
+              upd.language,
+              upd.genre,
+              upd.id,
+            ]);
+          } else {
+            await db.runAsync('UPDATE tracks SET language = ? WHERE id = ?', [
+              upd.language,
+              upd.id,
+            ]);
+          }
+        }
+      });
+    }
+
+    await setSetting(PREF_TRACK_LANG_AUDIT_VERSION, CURRENT_TRACK_LANG_AUDIT_VERSION);
+    return languageUpdates.length;
+  } catch {
+    return 0;
+  }
+}
 
 async function upsertTracks(payloads: OnlineTrackPayload[]): Promise<number> {
   if (!payloads.length) return 0;
@@ -588,6 +1020,8 @@ async function upsertTracks(payloads: OnlineTrackPayload[]): Promise<number> {
           store_url, youtube_url, duration_ms, popularity, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(external_source, external_id) DO UPDATE SET
+          language = excluded.language,
+          genre = CASE WHEN excluded.genre != '' THEN excluded.genre ELSE tracks.genre END,
           preview_url = excluded.preview_url,
           artwork_url = CASE WHEN excluded.artwork_url != '' THEN excluded.artwork_url ELSE tracks.artwork_url END,
           popularity = MAX(tracks.popularity, excluded.popularity)`,
@@ -618,16 +1052,73 @@ async function upsertTracks(payloads: OnlineTrackPayload[]): Promise<number> {
   return inserted;
 }
 
+let richCatalogSeedInFlight: Promise<number> | null = null;
+
+export async function ensureRichCatalogSeeded(minTracks = 180): Promise<number> {
+  if (richCatalogSeedInFlight) return richCatalogSeedInFlight;
+  richCatalogSeedInFlight = (async () => {
+    try {
+      const db = await getDatabase();
+      const countRow = await db.getFirstAsync<{
+        total: number;
+        trCount: number;
+        globalCount: number;
+      }>(
+        `SELECT
+          COUNT(*) AS total,
+          COALESCE(SUM(CASE WHEN language = 'tr' THEN 1 ELSE 0 END), 0) AS trCount,
+          COALESCE(SUM(CASE WHEN language = 'global' THEN 1 ELSE 0 END), 0) AS globalCount
+        FROM tracks`
+      );
+      const currentCount = countRow?.total || 0;
+      const trCount = countRow?.trCount || 0;
+      const globalCount = countRow?.globalCount || 0;
+
+      const needsTr = trCount < 90;
+      const needsGlobal = globalCount < 80;
+      const needsTotal = currentCount < minTracks;
+
+      if (!needsTr && !needsGlobal && !needsTotal) {
+        return 0;
+      }
+
+      let added = 0;
+      const moods: MoodType[] = ['positive', 'neutral', 'negative'];
+      const langsToSeed: Array<'tr' | 'global'> = [];
+      if (needsTr) langsToSeed.push('tr');
+      if (needsGlobal) langsToSeed.push('global');
+      if (langsToSeed.length === 0 && needsTotal) {
+        langsToSeed.push('tr', 'global');
+      }
+
+      for (const targetLang of langsToSeed) {
+        for (const mood of moods) {
+          const batch = await fetchOnlineTracksDirect({
+            mood,
+            language: targetLang,
+            artistsPerLang: 4,
+            tracksPerQuery: 12,
+          });
+          if (batch.length > 0) {
+            added += await upsertTracks(batch);
+          }
+        }
+      }
+      return added;
+    } catch {
+      return 0;
+    } finally {
+      richCatalogSeedInFlight = null;
+    }
+  })();
+  return richCatalogSeedInFlight;
+}
+
 async function ensureInitialCatalogSeeded(): Promise<void> {
   if (seedInFlight) return seedInFlight;
   seedInFlight = (async () => {
     try {
-      const [pos, neu, neg] = await Promise.all([
-        fetchOnlineTracksDirect({ mood: 'positive', language: 'all' }),
-        fetchOnlineTracksDirect({ mood: 'neutral', language: 'all' }),
-        fetchOnlineTracksDirect({ mood: 'negative', language: 'all' }),
-      ]);
-      await upsertTracks([...pos, ...neu, ...neg]);
+      await ensureRichCatalogSeeded(180);
     } finally {
       seedInFlight = null;
     }
@@ -645,18 +1136,131 @@ export async function fetchAndStoreOnlineSongs(params: {
   return upsertTracks(fetched);
 }
 
+// ───────────────────────── Taste Personalization & Dislike Engine ─────────────────────────
+
+interface UserTasteProfile {
+  topArtists: string[];
+  topGenres: string[];
+  topArtistSet: Set<string>;
+  topGenreSet: Set<string>;
+  dislikedIds: Set<number>;
+}
+
+async function getUserTasteProfile(userId: number): Promise<UserTasteProfile> {
+  const db = await getDatabase();
+  const [favRows, dislikeRows] = await Promise.all([
+    db.getAllAsync<{ artist: string; genre: string }>(
+      `SELECT t.artist, t.genre
+       FROM favorites f
+       JOIN tracks t ON t.id = f.track_id
+       WHERE f.user_id = ?
+       ORDER BY f.created_at DESC
+       LIMIT 60`,
+      [userId]
+    ),
+    db.getAllAsync<{ track_id: number }>(
+      'SELECT track_id FROM disliked_tracks WHERE user_id = ?',
+      [userId]
+    ),
+  ]);
+
+  const artistCounts = new Map<string, { label: string; count: number }>();
+  const genreCounts = new Map<string, { label: string; count: number }>();
+
+  for (const r of favRows) {
+    const a = String(r.artist || '').trim();
+    if (a) {
+      const k = a.toLowerCase();
+      const prev = artistCounts.get(k);
+      artistCounts.set(k, { label: prev?.label || a, count: (prev?.count || 0) + 1 });
+    }
+    const g = String(r.genre || '').trim();
+    if (g) {
+      const k = g.toLowerCase();
+      const prev = genreCounts.get(k);
+      genreCounts.set(k, { label: prev?.label || g, count: (prev?.count || 0) + 1 });
+    }
+  }
+
+  const topArtists = Array.from(artistCounts.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6)
+    .map((x) => x.label);
+  const topGenres = Array.from(genreCounts.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5)
+    .map((x) => x.label);
+
+  return {
+    topArtists,
+    topGenres,
+    topArtistSet: new Set(topArtists.map((a) => a.toLowerCase())),
+    topGenreSet: new Set(topGenres.map((g) => g.toLowerCase())),
+    dislikedIds: new Set(dislikeRows.map((d) => Number(d.track_id))),
+  };
+}
+
+function rankAndFilterTracks(
+  rawRows: any[],
+  taste: UserTasteProfile,
+  targetEmotion: EmotionType | null,
+  limit: number,
+  existingIds?: Set<number>,
+  existingSignatures?: Set<string>
+): TrackRecord[] {
+  const seenIds = new Set<number>(existingIds || []);
+  const seenSig = new Set<string>(existingSignatures || []);
+  const scored: Array<{ track: TrackRecord; score: number }> = [];
+
+  for (const raw of rawRows) {
+    const tr = mapTrackRow(raw);
+    if (taste.dislikedIds.has(tr.id) || seenIds.has(tr.id)) continue;
+    const sig = `${tr.artist.toLowerCase().trim()}::${tr.title.toLowerCase().trim()}`;
+    if (seenSig.has(sig)) continue;
+
+    seenIds.add(tr.id);
+    seenSig.add(sig);
+
+    let score = Math.random() * 14;
+    if (taste.topArtistSet.has(tr.artist.toLowerCase().trim())) {
+      score += 30;
+    }
+    if (taste.topGenreSet.has(tr.genre.toLowerCase().trim())) {
+      score += 12;
+    }
+    if (targetEmotion === 'angry' && tr.energyTag === 'angry-rock') {
+      score += 14;
+    }
+    if (tr.isFavorite) {
+      score += 8;
+    }
+    scored.push({ track: tr, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((s) => s.track);
+}
+
 export async function selectPlaylistForMood(
   mood: MoodType,
   userId: number,
   count = 16,
   language: 'all' | 'tr' | 'global' = 'all',
-  emotion?: EmotionType | null
+  emotion?: EmotionType | null,
+  strategy: MoodStrategy = 'match'
 ): Promise<TrackRecord[]> {
   const db = await getDatabase();
+  const taste = await getUserTasteProfile(userId);
+  const { targetMood, targetEmotion } = resolveTargetMoodForStrategy(emotion, mood, strategy);
 
   // Pull fresh songs from iTunes & Deezer directly on the iPhone
   try {
-    const fresh = await fetchOnlineTracksDirect({ mood, emotion, language });
+    const fresh = await fetchOnlineTracksDirect({
+      mood: targetMood,
+      emotion: targetEmotion,
+      language,
+      preferredArtists: taste.topArtists,
+    });
     if (fresh.length > 0) {
       await upsertTracks(fresh);
     }
@@ -664,46 +1268,49 @@ export async function selectPlaylistForMood(
     // Offline fallback: serve from local SQLite catalog
   }
 
-  const whereParts = ['t.mood = ?'];
-  const args: any[] = [userId, mood];
+  const whereParts = ['t.mood = ?', 'dt.track_id IS NULL'];
+  const args: any[] = [userId, userId, targetMood];
 
   if (language === 'tr' || language === 'global') {
     whereParts.push('t.language = ?');
     args.push(language);
   }
 
-  if (emotion === 'angry') {
+  if (targetEmotion === 'angry') {
     whereParts.push("(t.energy_tag = 'angry-rock' OR t.mood = 'negative')");
   }
 
-  args.push(count);
-
+  const poolLimit = Math.max(60, count * 4);
   const rows = await db.getAllAsync<any>(
     `SELECT t.*, CASE WHEN f.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
      FROM tracks t
      LEFT JOIN favorites f ON f.track_id = t.id AND f.user_id = ?
+     LEFT JOIN disliked_tracks dt ON dt.track_id = t.id AND dt.user_id = ?
      WHERE ${whereParts.join(' AND ')}
      ORDER BY
        CASE WHEN ? = 'angry' AND t.energy_tag = 'angry-rock' THEN 0 ELSE 1 END,
        RANDOM()
      LIMIT ?`,
-    [args[0], ...args.slice(1, args.length - 1), emotion || '', count]
+    [args[0], args[1], ...args.slice(2), targetEmotion || '', poolLimit]
   );
 
-  if (rows.length > 0) {
-    return rows.map(mapTrackRow);
+  const selected = rankAndFilterTracks(rows, taste, targetEmotion, count);
+  if (selected.length > 0) {
+    return selected;
   }
 
-  // Fallback to any tracks in local catalog if filtered set is empty
+  // Fallback to any non-disliked tracks in local catalog if filtered set is empty
   const fallbackRows = await db.getAllAsync<any>(
     `SELECT t.*, CASE WHEN f.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
      FROM tracks t
      LEFT JOIN favorites f ON f.track_id = t.id AND f.user_id = ?
+     LEFT JOIN disliked_tracks dt ON dt.track_id = t.id AND dt.user_id = ?
+     WHERE dt.track_id IS NULL
      ORDER BY RANDOM()
      LIMIT ?`,
-    [userId, count]
+    [userId, userId, poolLimit]
   );
-  return fallbackRows.map(mapTrackRow);
+  return rankAndFilterTracks(fallbackRows, taste, targetEmotion, count);
 }
 
 export async function queryCatalogTracks(options: {
@@ -712,12 +1319,16 @@ export async function queryCatalogTracks(options: {
   language?: 'tr' | 'global' | '';
   search?: string;
   favoritesOnly?: boolean;
+  includeDisliked?: boolean;
   limit?: number;
 }): Promise<TrackRecord[]> {
   const db = await getDatabase();
   const whereParts: string[] = ['1 = 1'];
-  const params: any[] = [options.userId];
+  const params: any[] = [options.userId, options.userId];
 
+  if (!options.includeDisliked) {
+    whereParts.push('dt.track_id IS NULL');
+  }
   if (options.mood) {
     whereParts.push('t.mood = ?');
     params.push(options.mood);
@@ -735,12 +1346,13 @@ export async function queryCatalogTracks(options: {
     whereParts.push('f.track_id IS NOT NULL');
   }
 
-  params.push(options.limit || 140);
+  params.push(options.limit || 400);
 
   const rows = await db.getAllAsync<any>(
     `SELECT t.*, CASE WHEN f.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
      FROM tracks t
      LEFT JOIN favorites f ON f.track_id = t.id AND f.user_id = ?
+     LEFT JOIN disliked_tracks dt ON dt.track_id = t.id AND dt.user_id = ?
      WHERE ${whereParts.join(' AND ')}
      ORDER BY is_favorite DESC, t.popularity DESC, t.id DESC
      LIMIT ?`,
@@ -772,6 +1384,43 @@ export async function toggleFavoriteTrack(userId: number, trackId: number): Prom
   return true;
 }
 
+export async function dislikeTrack(userId: number, trackId: number): Promise<void> {
+  const db = await getDatabase();
+  const now = new Date().toISOString();
+  await db.runAsync(
+    'INSERT OR IGNORE INTO disliked_tracks (user_id, track_id, created_at) VALUES (?, ?, ?)',
+    [userId, trackId, now]
+  );
+  await db.runAsync('DELETE FROM favorites WHERE user_id = ? AND track_id = ?', [userId, trackId]);
+  await db.runAsync(
+    `DELETE FROM scan_session_tracks
+     WHERE track_id = ?
+       AND session_id IN (SELECT id FROM scan_sessions WHERE user_id = ?)`,
+    [trackId, userId]
+  );
+}
+
+export async function listDislikedTracks(userId: number): Promise<TrackRecord[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<any>(
+    `SELECT t.*, 0 AS is_favorite
+     FROM disliked_tracks dt
+     JOIN tracks t ON t.id = dt.track_id
+     WHERE dt.user_id = ?
+     ORDER BY dt.created_at DESC`,
+    [userId]
+  );
+  return rows.map(mapTrackRow);
+}
+
+export async function undislikeTrack(userId: number, trackId: number): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync('DELETE FROM disliked_tracks WHERE user_id = ? AND track_id = ?', [
+    userId,
+    trackId,
+  ]);
+}
+
 // ───────────────────────── On-Device Camera Capture & Scan Sessions ─────────────────────────
 
 /**
@@ -788,6 +1437,7 @@ export async function captureAndSaveSessionOnServer(params: {
   deviceLabel: string;
   captureSource?: 'camera' | 'upload';
   language?: 'all' | 'tr' | 'global';
+  moodStrategy?: MoodStrategy;
 }): Promise<ScanSessionRecord> {
   const db = await getDatabase();
 
@@ -806,6 +1456,8 @@ export async function captureAndSaveSessionOnServer(params: {
     det.detected && det.confidence > 0
       ? det.confidence
       : params.fallbackConfidence || 0.82;
+  const emotionScores = det.emotionScores || null;
+  const strategy: MoodStrategy = params.moodStrategy || 'match';
 
   // 2. Save photo strictly inside app sandbox (never to iPhone Photos gallery)
   const snapshotUri = saveSnapshotToSandbox(params.imageBase64);
@@ -817,19 +1469,26 @@ export async function captureAndSaveSessionOnServer(params: {
     params.userId,
     16,
     params.language || 'all',
-    finalEmotion
+    finalEmotion,
+    strategy
   );
 
   // 4. Persist session & tracks in local SQLite
   const createdAt = new Date().toISOString();
+  const scoresJson = emotionScores ? JSON.stringify(emotionScores) : null;
   const insertRes = await db.runAsync(
-    `INSERT INTO scan_sessions (user_id, mood, emotion, confidence, snapshot_uri, device_label, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO scan_sessions (
+       user_id, mood, emotion, confidence, emotion_scores_json,
+       note, tags_json, mood_strategy, is_manual_override,
+       snapshot_uri, device_label, created_at
+     ) VALUES (?, ?, ?, ?, ?, '', '[]', ?, 0, ?, ?, ?)`,
     [
       params.userId,
       finalMood,
       finalEmotion,
       finalConfidence,
+      scoresJson,
+      strategy,
       snapshotUri,
       params.deviceLabel,
       createdAt,
@@ -850,6 +1509,11 @@ export async function captureAndSaveSessionOnServer(params: {
     mood: finalMood,
     emotion: finalEmotion,
     confidence: finalConfidence,
+    emotionScores,
+    note: '',
+    tags: [],
+    moodStrategy: strategy,
+    isManualOverride: false,
     snapshotUri,
     deviceLabel: params.deviceLabel,
     trackCount: tracks.length,
@@ -870,17 +1534,7 @@ export async function listScanSessions(userId: number): Promise<ScanSessionRecor
     [userId]
   );
 
-  return rows.map((r) => ({
-    id: Number(r.id),
-    userId: Number(r.user_id),
-    mood: (r.mood as MoodType) || 'neutral',
-    emotion: (r.emotion as EmotionType) || null,
-    confidence: Number(r.confidence || 0),
-    snapshotUri: r.snapshot_uri || null,
-    deviceLabel: String(r.device_label || 'iPhone 16 Pro'),
-    trackCount: Number(r.track_count || 0),
-    createdAt: String(r.created_at),
-  }));
+  return rows.map((r) => mapScanSessionFields(r));
 }
 
 export async function getScanSessionWithTracks(
@@ -906,17 +1560,85 @@ export async function getScanSessionWithTracks(
 
   const tracks = trackRows.map(mapTrackRow);
   return {
-    id: Number(row.id),
-    userId: Number(row.user_id),
-    mood: (row.mood as MoodType) || 'neutral',
-    emotion: (row.emotion as EmotionType) || null,
-    confidence: Number(row.confidence || 0),
-    snapshotUri: row.snapshot_uri || null,
-    deviceLabel: String(row.device_label || 'iPhone 16 Pro'),
-    trackCount: tracks.length,
-    createdAt: String(row.created_at),
+    ...mapScanSessionFields({ ...row, track_count: tracks.length }),
     tracks,
   };
+}
+
+export async function updateScanSessionMoodOrStrategy(params: {
+  sessionId: number;
+  userId: number;
+  emotion?: EmotionType;
+  strategy?: MoodStrategy;
+  language?: 'all' | 'tr' | 'global';
+  isManualOverride?: boolean;
+}): Promise<ScanSessionRecord | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<any>(
+    'SELECT * FROM scan_sessions WHERE id = ? AND user_id = ?',
+    [params.sessionId, params.userId]
+  );
+  if (!row) return null;
+
+  const nextEmotion: EmotionType | null =
+    params.emotion ?? ((row.emotion as EmotionType) || null);
+  const nextMood: MoodType = params.emotion
+    ? emotionToMood(params.emotion)
+    : (row.mood as MoodType) || 'neutral';
+  const nextStrategy: MoodStrategy =
+    params.strategy ?? (row.mood_strategy === 'uplift' ? 'uplift' : 'match');
+  const nextOverride =
+    params.isManualOverride !== undefined
+      ? params.isManualOverride
+        ? 1
+        : 0
+      : Number(row.is_manual_override || 0);
+
+  const freshTracks = await selectPlaylistForMood(
+    nextMood,
+    params.userId,
+    16,
+    params.language || 'all',
+    nextEmotion,
+    nextStrategy
+  );
+
+  await db.runAsync(
+    `UPDATE scan_sessions
+     SET mood = ?, emotion = ?, mood_strategy = ?, is_manual_override = ?
+     WHERE id = ? AND user_id = ?`,
+    [nextMood, nextEmotion, nextStrategy, nextOverride, params.sessionId, params.userId]
+  );
+
+  await db.runAsync('DELETE FROM scan_session_tracks WHERE session_id = ?', [params.sessionId]);
+  for (let i = 0; i < freshTracks.length; i++) {
+    await db.runAsync(
+      'INSERT OR IGNORE INTO scan_session_tracks (session_id, track_id, position) VALUES (?, ?, ?)',
+      [params.sessionId, freshTracks[i].id, i]
+    );
+  }
+
+  return getScanSessionWithTracks(params.sessionId, params.userId);
+}
+
+export async function updateScanSessionJournal(params: {
+  sessionId: number;
+  userId: number;
+  note: string;
+  tags: string[];
+}): Promise<ScanSessionRecord | null> {
+  const db = await getDatabase();
+  const cleanNote = params.note.trim().slice(0, 280);
+  const cleanTags = Array.from(
+    new Set(params.tags.map((t) => t.trim()).filter(Boolean))
+  ).slice(0, 12);
+
+  await db.runAsync(
+    'UPDATE scan_sessions SET note = ?, tags_json = ? WHERE id = ? AND user_id = ?',
+    [cleanNote, JSON.stringify(cleanTags), params.sessionId, params.userId]
+  );
+
+  return getScanSessionWithTracks(params.sessionId, params.userId);
 }
 
 export async function expandScanSessionTracks(params: {
@@ -934,8 +1656,15 @@ export async function expandScanSessionTracks(params: {
 
   const targetAdd = Math.max(1, Math.min(30, params.addCount ?? 8));
   const lang = params.language || 'all';
-  const mood = (row.mood as MoodType) || 'neutral';
-  const emotion = (row.emotion as EmotionType) || null;
+  const baseMood = (row.mood as MoodType) || 'neutral';
+  const baseEmotion = (row.emotion as EmotionType) || null;
+  const strategy: MoodStrategy = row.mood_strategy === 'uplift' ? 'uplift' : 'match';
+  const { targetMood: mood, targetEmotion: emotion } = resolveTargetMoodForStrategy(
+    baseEmotion,
+    baseMood,
+    strategy
+  );
+  const taste = await getUserTasteProfile(params.userId);
 
   const existingRows = await db.getAllAsync<{
     track_id: number;
@@ -970,8 +1699,8 @@ export async function expandScanSessionTracks(params: {
   }
 
   const pickUniqueCandidates = async (): Promise<TrackRecord[]> => {
-    const whereParts = ['t.mood = ?'];
-    const args: any[] = [params.userId, mood];
+    const whereParts = ['t.mood = ?', 'dt.track_id IS NULL'];
+    const args: any[] = [params.userId, params.userId, mood];
 
     if (lang === 'tr' || lang === 'global') {
       whereParts.push('t.language = ?');
@@ -982,38 +1711,37 @@ export async function expandScanSessionTracks(params: {
       whereParts.push("(t.energy_tag = 'angry-rock' OR t.mood = 'negative')");
     }
 
-    const queryLimit = Math.max(40, targetAdd * 5);
+    const queryLimit = Math.max(50, targetAdd * 6);
     const rows = await db.getAllAsync<any>(
       `SELECT t.*, CASE WHEN f.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
        FROM tracks t
        LEFT JOIN favorites f ON f.track_id = t.id AND f.user_id = ?
+       LEFT JOIN disliked_tracks dt ON dt.track_id = t.id AND dt.user_id = ?
        WHERE ${whereParts.join(' AND ')}
        ORDER BY
          CASE WHEN ? = 'angry' AND t.energy_tag = 'angry-rock' THEN 0 ELSE 1 END,
          RANDOM()
        LIMIT ?`,
-      [args[0], ...args.slice(1), emotion || '', queryLimit]
+      [args[0], args[1], ...args.slice(2), emotion || '', queryLimit]
     );
 
-    const unique: TrackRecord[] = [];
-    const seenSig = new Set<string>(existingSignatures);
-    const seenIds = new Set<number>(existingIds);
-
-    for (const raw of rows) {
-      const tr = mapTrackRow(raw);
-      const sig = `${tr.artist.toLowerCase().trim()}::${tr.title.toLowerCase().trim()}`;
-      if (seenIds.has(tr.id) || seenSig.has(sig)) continue;
-      seenIds.add(tr.id);
-      seenSig.add(sig);
-      unique.push(tr);
-      if (unique.length >= targetAdd) break;
-    }
-
-    return unique;
+    return rankAndFilterTracks(
+      rows,
+      taste,
+      emotion,
+      targetAdd,
+      existingIds,
+      existingSignatures
+    );
   };
 
   try {
-    const fresh = await fetchOnlineTracksDirect({ mood, emotion, language: lang });
+    const fresh = await fetchOnlineTracksDirect({
+      mood,
+      emotion,
+      language: lang,
+      preferredArtists: taste.topArtists,
+    });
     if (fresh.length > 0) {
       await upsertTracks(fresh);
     }
@@ -1025,7 +1753,12 @@ export async function expandScanSessionTracks(params: {
 
   if (selected.length < targetAdd) {
     try {
-      const extraFresh = await fetchOnlineTracksDirect({ mood, emotion: null, language: lang });
+      const extraFresh = await fetchOnlineTracksDirect({
+        mood,
+        emotion: null,
+        language: lang,
+        preferredArtists: taste.topArtists,
+      });
       if (extraFresh.length > 0) {
         await upsertTracks(extraFresh);
         selected = await pickUniqueCandidates();
@@ -1118,6 +1851,9 @@ const ADMIN_ALLOWED_TABLES: Record<AdminTableName, true> = {
   tracks: true,
   favorites: true,
   scan_session_tracks: true,
+  disliked_tracks: true,
+  playlists: true,
+  playlist_tracks: true,
 };
 
 function maskSensitiveRow(row: Record<string, unknown>): Record<string, unknown> {
@@ -1139,6 +1875,9 @@ export async function getAdminDatabaseOverview(): Promise<AdminDatabaseOverview>
     trackRow,
     favRow,
     linkRow,
+    dislikedRow,
+    playlistRow,
+    playlistTrackRow,
     pageCountRow,
     pageSizeRow,
     emotionRows,
@@ -1154,6 +1893,9 @@ export async function getAdminDatabaseOverview(): Promise<AdminDatabaseOverview>
     db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM tracks'),
     db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM favorites'),
     db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM scan_session_tracks'),
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM disliked_tracks'),
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM playlists'),
+    db.getFirstAsync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM playlist_tracks'),
     db.getFirstAsync<Record<string, unknown>>('PRAGMA page_count'),
     db.getFirstAsync<Record<string, unknown>>('PRAGMA page_size'),
     db.getAllAsync<{ emotion: string; count: number }>(
@@ -1210,6 +1952,14 @@ export async function getAdminDatabaseOverview(): Promise<AdminDatabaseOverview>
   const trackCount = Number(trackRow?.cnt || 0);
   const favoriteCount = Number(favRow?.cnt || 0);
   const sessionTrackLinkCount = Number(linkRow?.cnt || 0);
+  const dislikedCount = Number(dislikedRow?.cnt || 0);
+  const playlistCount = Number(playlistRow?.cnt || 0);
+  const playlistTrackCount = Number(playlistTrackRow?.cnt || 0);
+
+  const safePrefs = { ...readPrefs() };
+  if (safePrefs[PREF_BIO_TOKEN_HASH]) {
+    safePrefs[PREF_BIO_TOKEN_HASH] = `sha256:${safePrefs[PREF_BIO_TOKEN_HASH].slice(0, 10)}…`;
+  }
 
   return {
     userCount,
@@ -1243,8 +1993,11 @@ export async function getAdminDatabaseOverview(): Promise<AdminDatabaseOverview>
       { name: 'tracks', rowCount: trackCount },
       { name: 'favorites', rowCount: favoriteCount },
       { name: 'scan_session_tracks', rowCount: sessionTrackLinkCount },
+      { name: 'disliked_tracks', rowCount: dislikedCount },
+      { name: 'playlists', rowCount: playlistCount },
+      { name: 'playlist_tracks', rowCount: playlistTrackCount },
     ],
-    prefs: { ...readPrefs() },
+    prefs: safePrefs,
   };
 }
 
@@ -1349,6 +2102,9 @@ export async function adminDeleteUser(targetUserId: number): Promise<void> {
   }
 
   await db.runAsync('DELETE FROM users WHERE id = ?', [targetUserId]);
+  if (String(targetUserId) === readPrefs()[PREF_BIO_USER_ID]) {
+    await disableBiometricBinding();
+  }
 }
 
 export async function adminListAllScanSessions(
@@ -1369,17 +2125,9 @@ export async function adminListAllScanSessions(
   );
 
   return rows.map((r) => ({
-    id: Number(r.id),
-    userId: Number(r.user_id),
+    ...mapScanSessionFields(r),
     username: String(r.username || ''),
     displayName: String(r.display_name || r.username || ''),
-    mood: (r.mood as MoodType) || 'neutral',
-    emotion: (r.emotion as EmotionType) || null,
-    confidence: Number(r.confidence || 0),
-    snapshotUri: r.snapshot_uri || null,
-    deviceLabel: String(r.device_label || 'iPhone 16 Pro'),
-    trackCount: Number(r.track_count || 0),
-    createdAt: String(r.created_at),
   }));
 }
 
@@ -1409,17 +2157,9 @@ export async function adminGetScanSessionWithTracks(
 
   const tracks = trackRows.map(mapTrackRow);
   return {
-    id: Number(row.id),
-    userId: ownerId,
+    ...mapScanSessionFields({ ...row, track_count: tracks.length }),
     username: String(row.username || ''),
     displayName: String(row.display_name || row.username || ''),
-    mood: (row.mood as MoodType) || 'neutral',
-    emotion: (row.emotion as EmotionType) || null,
-    confidence: Number(row.confidence || 0),
-    snapshotUri: row.snapshot_uri || null,
-    deviceLabel: String(row.device_label || 'iPhone 16 Pro'),
-    trackCount: tracks.length,
-    createdAt: String(row.created_at),
     tracks,
   };
 }
@@ -1548,4 +2288,233 @@ export async function adminRunReadOnlyQuery(sql: string): Promise<{
     totalRows: allRows.length,
     elapsedMs,
   };
+}
+
+
+// ───────────────────────── Custom User Playlists (CRUD) ─────────────────────────
+
+export async function listUserPlaylists(userId: number): Promise<PlaylistRecord[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<any>(
+    `SELECT p.*,
+            (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count
+     FROM playlists p
+     WHERE p.user_id = ?
+     ORDER BY p.updated_at DESC, p.id DESC`,
+    [userId]
+  );
+
+  const result: PlaylistRecord[] = [];
+  for (const r of rows) {
+    const pid = Number(r.id);
+    const artRows = await db.getAllAsync<{ artwork_url: string }>(
+      `SELECT t.artwork_url
+       FROM playlist_tracks pt
+       JOIN tracks t ON t.id = pt.track_id
+       WHERE pt.playlist_id = ? AND t.artwork_url != ''
+       ORDER BY pt.position ASC
+       LIMIT 4`,
+      [pid]
+    );
+    result.push({
+      id: pid,
+      userId: Number(r.user_id),
+      name: String(r.name || ''),
+      description: String(r.description || ''),
+      mood: (r.mood as MoodType) || null,
+      colorHex: r.color_hex ? String(r.color_hex) : null,
+      trackCount: Number(r.track_count || 0),
+      coverArtworks: artRows.map((a) => String(a.artwork_url)).filter(Boolean),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at),
+    });
+  }
+  return result;
+}
+
+export async function getPlaylistWithTracks(
+  playlistId: number,
+  userId: number
+): Promise<PlaylistRecord | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<any>(
+    'SELECT * FROM playlists WHERE id = ? AND user_id = ?',
+    [playlistId, userId]
+  );
+  if (!row) return null;
+
+  const trackRows = await db.getAllAsync<any>(
+    `SELECT t.*, CASE WHEN f.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+     FROM playlist_tracks pt
+     JOIN tracks t ON t.id = pt.track_id
+     LEFT JOIN favorites f ON f.track_id = t.id AND f.user_id = ?
+     WHERE pt.playlist_id = ?
+     ORDER BY pt.position ASC`,
+    [userId, playlistId]
+  );
+
+  const tracks = trackRows.map(mapTrackRow);
+  const coverArtworks = tracks
+    .map((t) => t.artworkUrl)
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return {
+    id: Number(row.id),
+    userId: Number(row.user_id),
+    name: String(row.name || ''),
+    description: String(row.description || ''),
+    mood: (row.mood as MoodType) || null,
+    colorHex: row.color_hex ? String(row.color_hex) : null,
+    trackCount: tracks.length,
+    coverArtworks,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    tracks,
+  };
+}
+
+export async function createPlaylist(params: {
+  userId: number;
+  name: string;
+  description?: string;
+  mood?: MoodType | null;
+  colorHex?: string | null;
+  initialTrackIds?: number[];
+}): Promise<PlaylistRecord> {
+  const cleanName = params.name.trim();
+  if (!cleanName) {
+    throw new Error('Çalma listesi adı boş olamaz.');
+  }
+
+  const db = await getDatabase();
+  const now = new Date().toISOString();
+  const res = await db.runAsync(
+    `INSERT INTO playlists (user_id, name, description, mood, color_hex, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      params.userId,
+      cleanName,
+      (params.description || '').trim(),
+      params.mood || null,
+      params.colorHex || null,
+      now,
+      now,
+    ]
+  );
+
+  const playlistId = Number(res.lastInsertRowId);
+  const uniqueIds = Array.from(new Set(params.initialTrackIds || []));
+  for (let i = 0; i < uniqueIds.length; i++) {
+    await db.runAsync(
+      'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)',
+      [playlistId, uniqueIds[i], i, now]
+    );
+  }
+
+  const full = await getPlaylistWithTracks(playlistId, params.userId);
+  if (full) return full;
+
+  return {
+    id: playlistId,
+    userId: params.userId,
+    name: cleanName,
+    description: (params.description || '').trim(),
+    mood: params.mood || null,
+    colorHex: params.colorHex || null,
+    trackCount: uniqueIds.length,
+    coverArtworks: [],
+    createdAt: now,
+    updatedAt: now,
+    tracks: [],
+  };
+}
+
+export async function renamePlaylist(
+  playlistId: number,
+  userId: number,
+  name: string,
+  description?: string
+): Promise<void> {
+  const cleanName = name.trim();
+  if (!cleanName) {
+    throw new Error('Çalma listesi adı boş olamaz.');
+  }
+  const db = await getDatabase();
+  const now = new Date().toISOString();
+  if (description !== undefined) {
+    await db.runAsync(
+      'UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ? AND user_id = ?',
+      [cleanName, description.trim(), now, playlistId, userId]
+    );
+  } else {
+    await db.runAsync(
+      'UPDATE playlists SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?',
+      [cleanName, now, playlistId, userId]
+    );
+  }
+}
+
+export async function deletePlaylist(playlistId: number, userId: number): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync('DELETE FROM playlists WHERE id = ? AND user_id = ?', [playlistId, userId]);
+}
+
+export async function addTracksToPlaylist(
+  playlistId: number,
+  userId: number,
+  trackIds: number[]
+): Promise<number> {
+  const db = await getDatabase();
+  const owner = await db.getFirstAsync<{ id: number }>(
+    'SELECT id FROM playlists WHERE id = ? AND user_id = ?',
+    [playlistId, userId]
+  );
+  if (!owner) {
+    throw new Error('Çalma listesi bulunamadı.');
+  }
+
+  const maxRow = await db.getFirstAsync<{ max_pos: number | null }>(
+    'SELECT MAX(position) AS max_pos FROM playlist_tracks WHERE playlist_id = ?',
+    [playlistId]
+  );
+  let nextPos = Number(maxRow?.max_pos ?? -1) + 1;
+  const now = new Date().toISOString();
+  let added = 0;
+
+  for (const tid of Array.from(new Set(trackIds))) {
+    const res = await db.runAsync(
+      'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)',
+      [playlistId, tid, nextPos, now]
+    );
+    if (res.changes > 0) {
+      nextPos++;
+      added++;
+    }
+  }
+
+  await db.runAsync('UPDATE playlists SET updated_at = ? WHERE id = ?', [now, playlistId]);
+  return added;
+}
+
+export async function removeTrackFromPlaylist(
+  playlistId: number,
+  userId: number,
+  trackId: number
+): Promise<void> {
+  const db = await getDatabase();
+  const owner = await db.getFirstAsync<{ id: number }>(
+    'SELECT id FROM playlists WHERE id = ? AND user_id = ?',
+    [playlistId, userId]
+  );
+  if (!owner) return;
+
+  await db.runAsync(
+    'DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?',
+    [playlistId, trackId]
+  );
+  await db.runAsync('UPDATE playlists SET updated_at = ? WHERE id = ?', [
+    new Date().toISOString(),
+    playlistId,
+  ]);
 }

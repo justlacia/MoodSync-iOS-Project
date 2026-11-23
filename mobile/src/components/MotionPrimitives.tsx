@@ -1,5 +1,5 @@
 import * as Haptics from 'expo-haptics';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
@@ -18,12 +18,18 @@ import { useTheme } from '../theme/ThemeContext';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
+const STAGGER_EASE_OUT = Easing.bezier(0.22, 1, 0.36, 1);
+const STAGGER_STEP_MS = 26;
+const STAGGER_DURATION_MS = 250;
+
 interface StaggeredEntryProps {
   children: React.ReactNode;
   index?: number;
   animationKey?: string | number;
   direction?: 'up' | 'down' | 'left' | 'right';
   distance?: number;
+  active?: boolean;
+  enabled?: boolean;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -32,7 +38,9 @@ export const StaggeredEntry: React.FC<StaggeredEntryProps> = ({
   index = 0,
   animationKey,
   direction = 'up',
-  distance = 16,
+  distance = 18,
+  active = true,
+  enabled = true,
   style,
 }) => {
   const initialOffset =
@@ -44,44 +52,80 @@ export const StaggeredEntry: React.FC<StaggeredEntryProps> = ({
 
   const indexRef = useRef(index);
   indexRef.current = index;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+  const animRef = useRef<Animated.CompositeAnimation | null>(null);
 
-  const opacity = useRef(new Animated.Value(0)).current;
-  const translate = useRef(new Animated.Value(initialOffset)).current;
-  const scale = useRef(new Animated.Value(0.97)).current;
+  const progress = useRef(new Animated.Value(enabled ? 0 : 1)).current;
 
-  useEffect(() => {
-    opacity.setValue(0);
-    translate.setValue(initialOffset);
-    scale.setValue(0.97);
+  const { opacity, translate, scale } = useMemo(
+    () => ({
+      opacity: progress.interpolate({
+        inputRange: [0, 0.72, 1],
+        outputRange: [0, 1, 1],
+        extrapolate: 'clamp',
+      }),
+      translate: progress.interpolate({
+        inputRange: [0, 1],
+        outputRange: [initialOffset, 0],
+      }),
+      scale: progress.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.97, 1],
+      }),
+    }),
+    [initialOffset, progress]
+  );
 
-    const delay = Math.min(indexRef.current, 12) * 45;
-    const anim = Animated.parallel([
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: 300,
-        delay,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-      Animated.spring(translate, {
-        toValue: 0,
-        delay,
-        damping: 18,
-        stiffness: 180,
-        mass: 0.8,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scale, {
-        toValue: 1,
-        delay,
-        damping: 18,
-        stiffness: 185,
-        useNativeDriver: true,
-      }),
-    ]);
-    anim.start();
-    return () => anim.stop();
-  }, [animationKey, initialOffset, opacity, scale, translate]);
+  useLayoutEffect(() => {
+    animRef.current?.stop();
+    animRef.current = null;
+
+    if (!enabledRef.current) {
+      progress.setValue(1);
+      return;
+    }
+
+    if (!active) {
+      progress.setValue(0);
+      return;
+    }
+
+    progress.setValue(0);
+
+    const delayMs = Math.min(indexRef.current, 6) * STAGGER_STEP_MS;
+    const totalDuration = delayMs + STAGGER_DURATION_MS;
+    const startFrac = delayMs > 0 ? delayMs / totalDuration : 0;
+    const easing =
+      startFrac > 0
+        ? (t: number) =>
+            t <= startFrac ? 0 : STAGGER_EASE_OUT((t - startFrac) / (1 - startFrac))
+        : STAGGER_EASE_OUT;
+
+    const anim = Animated.timing(progress, {
+      toValue: 1,
+      duration: totalDuration,
+      delay: 0,
+      easing,
+      useNativeDriver: true,
+    });
+    animRef.current = anim;
+    anim.start(() => {
+      if (animRef.current === anim) {
+        animRef.current = null;
+      }
+      queueMicrotask(() => {
+        if (!activeRef.current && enabledRef.current) {
+          progress.setValue(0);
+        }
+      });
+    });
+    return () => {
+      anim.stop();
+    };
+  }, [active, animationKey, progress]);
 
   const isHorizontal = direction === 'left' || direction === 'right';
   const transformStyle = isHorizontal
@@ -197,6 +241,8 @@ export function AnimatedSegmentedControl<T extends string>({
 
   const translateX = useRef(new Animated.Value(0)).current;
   const hasMeasured = useRef(false);
+  const prevActiveIdxRef = useRef(activeIdx);
+  const animRef = useRef<Animated.CompositeAnimation | null>(null);
 
   useEffect(() => {
     if (pillWidth <= 0) return;
@@ -204,15 +250,34 @@ export function AnimatedSegmentedControl<T extends string>({
     if (!hasMeasured.current) {
       translateX.setValue(targetX);
       hasMeasured.current = true;
+      prevActiveIdxRef.current = activeIdx;
       return;
     }
-    Animated.spring(translateX, {
+    if (prevActiveIdxRef.current === activeIdx) {
+      // Layout width changed without changing selection (e.g. tab returning from display: none)
+      animRef.current?.stop();
+      animRef.current = null;
+      translateX.setValue(targetX);
+      return;
+    }
+    prevActiveIdxRef.current = activeIdx;
+    animRef.current?.stop();
+    const anim = Animated.spring(translateX, {
       toValue: targetX,
-      damping: 20,
-      stiffness: 240,
-      mass: 0.8,
+      damping: 22,
+      stiffness: 260,
+      mass: 0.78,
       useNativeDriver: true,
-    }).start();
+    });
+    animRef.current = anim;
+    anim.start(({ finished }) => {
+      if (finished && animRef.current === anim) {
+        animRef.current = null;
+      }
+    });
+    return () => {
+      anim.stop();
+    };
   }, [activeIdx, pillWidth, translateX]);
 
   const handleLayout = (e: LayoutChangeEvent) => {
@@ -327,16 +392,24 @@ export const AnimatedProgressBar: React.FC<AnimatedProgressBarProps> = ({
 }) => {
   const clamped = Math.max(0, Math.min(1, Number.isFinite(ratio) ? ratio : 0));
   const anim = useRef(new Animated.Value(0)).current;
+  const hasAnimatedRef = useRef(false);
 
   useEffect(() => {
-    anim.setValue(0);
-    Animated.timing(anim, {
+    if (!hasAnimatedRef.current) {
+      anim.setValue(0);
+      hasAnimatedRef.current = true;
+    }
+    const timing = Animated.timing(anim, {
       toValue: clamped,
-      duration: 620,
+      duration: 520,
       delay,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
-    }).start();
+    });
+    timing.start();
+    return () => {
+      timing.stop();
+    };
   }, [anim, clamped, delay]);
 
   const widthInterpolate = anim.interpolate({
