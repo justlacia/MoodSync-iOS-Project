@@ -23,6 +23,18 @@ webapp/data/*.db-shm
 *.db-wal
 *.db-shm
 
+# Environment & Secrets
+.env
+*.env
+.env.*
+**/.env
+**/.env.*
+
+# Cloud API Build & Dependencies
+cloud-api/node_modules/
+cloud-api/dist/
+cloud-api/deploy.zip
+
 # Mobile Build & Dependencies
 mobile/node_modules/
 mobile/.expo/

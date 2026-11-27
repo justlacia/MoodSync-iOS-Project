@@ -24,12 +24,11 @@ import { TrackRow } from '../components/TrackRow';
 import {
   createPlaylist,
   deletePlaylist,
-  ensureRichCatalogSeeded,
   fetchAndStoreOnlineSongs,
   getPlaylistWithTracks,
   listUserPlaylists,
   PlaylistRecord,
-  queryCatalogTracks,
+  queryCatalogTracksPage,
   renamePlaylist,
   TrackRecord,
 } from '../database/iosDatabase';
@@ -114,10 +113,12 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
 
   const [catalogState, setCatalogState] = useState<{
     rows: TrackRecord[];
+    totalCount: number;
     animKey: number;
     hasLoaded: boolean;
   }>({
     rows: [],
+    totalCount: 0,
     animKey: 0,
     hasLoaded: false,
   });
@@ -134,14 +135,11 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
   const prevPlaylistsTickRef = useRef(playlistsRefreshTick);
   const songsListRef = useRef<FlatList<TrackRecord>>(null);
 
-  const totalSongs = catalogState.rows.length;
+  const totalSongs = catalogState.totalCount;
   const totalPages = Math.max(1, Math.ceil(totalSongs / SONGS_PER_PAGE));
   const safePage = Math.min(currentPage, totalPages);
   const pageStartIdx = (safePage - 1) * SONGS_PER_PAGE;
-  const pagedRows = useMemo(
-    () => catalogState.rows.slice(pageStartIdx, pageStartIdx + SONGS_PER_PAGE),
-    [catalogState.rows, pageStartIdx]
-  );
+  const pagedRows = catalogState.rows;
   const rangeStart = totalSongs > 0 ? pageStartIdx + 1 : 0;
   const rangeEnd = Math.min(totalSongs, pageStartIdx + pagedRows.length);
 
@@ -170,7 +168,16 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
   const renderPaginationBar = useCallback(
     (position: 'top' | 'bottom') => {
       if (totalPages <= 1) return null;
-      const pages = Array.from({ length: totalPages }, (_, idx) => idx + 1);
+      const pages: number[] = [];
+      if (totalPages <= 14) {
+        for (let p = 1; p <= totalPages; p++) pages.push(p);
+      } else {
+        const set = new Set<number>([1, totalPages]);
+        for (let p = Math.max(1, safePage - 3); p <= Math.min(totalPages, safePage + 3); p++) {
+          set.add(p);
+        }
+        pages.push(...Array.from(set).sort((a, b) => a - b));
+      }
       return (
         <View
           style={[
@@ -207,19 +214,27 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
               contentContainerStyle={styles.pageNumbersScroll}
               style={styles.pageNumbersScroller}
             >
-              {pages.map((pageNum) => {
+              {pages.map((pageNum, idx) => {
                 const active = pageNum === safePage;
+                const prev = idx > 0 ? pages[idx - 1] : null;
+                const hasGap = prev !== null && pageNum - prev > 1;
                 return (
-                  <SpringPressable
-                    key={pageNum}
-                    haptic
-                    onPress={() => handleSelectPage(pageNum)}
-                    style={[styles.pageNumBtn, active && styles.pageNumBtnActive]}
-                  >
-                    <Text style={[styles.pageNumText, active && styles.pageNumTextActive]}>
-                      {pageNum}
-                    </Text>
-                  </SpringPressable>
+                  <React.Fragment key={pageNum}>
+                    {hasGap && (
+                      <Text style={[styles.pageNumText, { alignSelf: 'center', paddingHorizontal: 4 }]}>
+                        …
+                      </Text>
+                    )}
+                    <SpringPressable
+                      haptic
+                      onPress={() => handleSelectPage(pageNum)}
+                      style={[styles.pageNumBtn, active && styles.pageNumBtnActive]}
+                    >
+                      <Text style={[styles.pageNumText, active && styles.pageNumTextActive]}>
+                        {pageNum}
+                      </Text>
+                    </SpringPressable>
+                  </React.Fragment>
                 );
               })}
             </ScrollView>
@@ -300,23 +315,23 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
     return () => clearTimeout(timer);
   }, [search]);
 
-  const autoHydratedKeysRef = useRef<Set<string>>(new Set());
-
   const loadTracks = useCallback(
     async (shouldAnimate = true) => {
       const reqId = ++requestIdRef.current;
       try {
-        const rows = await queryCatalogTracks({
+        const pageData = await queryCatalogTracksPage({
           userId,
           mood: moodFilter,
           language: langFilter,
           search: debouncedSearch,
           favoritesOnly: favOnly,
-          limit: 400,
+          page: currentPage,
+          pageSize: SONGS_PER_PAGE,
         });
         if (reqId !== requestIdRef.current) return;
         setCatalogState((prev) => ({
-          rows,
+          rows: pageData.tracks,
+          totalCount: pageData.totalCount,
           animKey: shouldAnimate ? prev.animKey + 1 : prev.animKey,
           hasLoaded: true,
         }));
@@ -324,10 +339,12 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
           setPageAnimTick((t) => t + 1);
         }
       } catch {
-        // Ignore transient error
+        if (reqId === requestIdRef.current) {
+          setCatalogState((prev) => (prev.hasLoaded ? prev : { ...prev, hasLoaded: true }));
+        }
       }
     },
-    [debouncedSearch, favOnly, langFilter, moodFilter, userId]
+    [currentPage, debouncedSearch, favOnly, langFilter, moodFilter, userId]
   );
 
   useEffect(() => {
@@ -342,57 +359,6 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
     void loadTracks(false);
   }, [loadTracks, playlistsRefreshTick]);
 
-  // Automatically hydrate local catalog in background when active view has few songs
-  useEffect(() => {
-    if (!catalogState.hasLoaded || debouncedSearch.trim() || favOnly) return;
-    if (catalogState.rows.length >= 25) return;
-
-    const filterKey = `${moodFilter || 'all'}:${langFilter || 'all'}`;
-    if (autoHydratedKeysRef.current.has(filterKey)) return;
-    autoHydratedKeysRef.current.add(filterKey);
-
-    let cancelled = false;
-    (async () => {
-      try {
-        let added = 0;
-        const resolvedLang: 'all' | 'tr' | 'global' = langFilter || 'all';
-        if (!moodFilter && resolvedLang === 'all') {
-          added = await ensureRichCatalogSeeded(180);
-        } else if (!moodFilter) {
-          const moods: MoodType[] = ['positive', 'neutral', 'negative'];
-          for (const m of moods) {
-            if (cancelled) return;
-            added += await fetchAndStoreOnlineSongs({ mood: m, language: resolvedLang });
-          }
-        } else {
-          added = await fetchAndStoreOnlineSongs({
-            mood: moodFilter,
-            language: resolvedLang,
-          });
-        }
-        if (!cancelled && added > 0) {
-          onCatalogExpanded();
-          await loadTracks(false);
-        }
-      } catch {
-        // Non-blocking background sync
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    catalogState.hasLoaded,
-    catalogState.rows.length,
-    debouncedSearch,
-    favOnly,
-    langFilter,
-    loadTracks,
-    moodFilter,
-    onCatalogExpanded,
-  ]);
-
   const handlePullOnline = useCallback(async () => {
     if (fetchingOnline) return;
     Haptics.selectionAsync().catch(() => {});
@@ -405,6 +371,8 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
       });
       onCatalogExpanded();
       await loadTracks(true);
+    } catch (err: any) {
+      Alert.alert('Bağlantı Hatası', err?.message || 'Şarkılar buluta eklenemedi.');
     } finally {
       setFetchingOnline(false);
     }
@@ -412,14 +380,12 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
 
   const catalogRowsRef = useRef(catalogState.rows);
   catalogRowsRef.current = catalogState.rows;
-  const pageStartIdxRef = useRef(pageStartIdx);
-  pageStartIdxRef.current = pageStartIdx;
   const loadTracksRef = useRef(loadTracks);
   loadTracksRef.current = loadTracks;
 
   const handlePlayPagedIndex = useCallback(
     (pageIndex: number) => {
-      onPlayTrack(catalogRowsRef.current, pageStartIdxRef.current + pageIndex);
+      onPlayTrack(catalogRowsRef.current, pageIndex);
     },
     [onPlayTrack]
   );
@@ -471,7 +437,7 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>Müzik Veritabanı</Text>
             <Text style={styles.subtitle}>
-              {catalogTotal} çevrimiçi şarkı senkronize edildi · Apple iTunes &amp; Deezer destekli
+              {catalogTotal} Azure bulut şarkısı · Apple iTunes &amp; Deezer destekli
             </Text>
           </View>
           <SpringPressable
@@ -578,7 +544,7 @@ export const LibraryScreen: React.FC<Props> = React.memo(({
       catalogState.hasLoaded ? (
         <View style={styles.emptyBox}>
           <Text style={styles.emptyText}>
-            Aramana uygun yerel kayıt bulunamadı. &quot;İnternetten Çek&quot; tuşuyla çevrimiçi veritabanından anında ekleyebilirsin.
+            Bulut kütüphanesinde aramana uygun şarkı bulunamadı. &quot;İnternetten Çek&quot; tuşuyla Azure kataloğuna anında yeni şarkılar ekleyebilirsin.
           </Text>
         </View>
       ) : undefined,

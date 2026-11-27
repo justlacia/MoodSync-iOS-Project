@@ -324,7 +324,7 @@ export const SettingsScreen: React.FC<Props> = React.memo(({
                   <PulseDot color={colors.brand} size={6} />
                 </View>
                 <Text style={styles.adminEntrySub}>
-                  Tüm hesapları, taramaları, fotoğrafları ve SQLite veritabanını görüntüle ve yönet
+                  Tüm hesapları, taramaları, Blob fotoğrafları ve Azure PostgreSQL veritabanını yönet
                 </Text>
               </View>
               <Ionicons name="chevron-forward" size={20} color={colors.brand} />
@@ -489,8 +489,8 @@ export const SettingsScreen: React.FC<Props> = React.memo(({
           <View style={styles.aiHeaderRow}>
             <Text style={styles.sectionMiniTitle}>YAPAY ZEKA &amp; CİHAZ BİLGİSİ</Text>
             <View style={styles.privacyBadge}>
-              <Ionicons name="lock-closed" size={11} color={colors.moodNeutral} />
-              <Text style={styles.privacyBadgeText}>Cihaz İçi · Buluta Gönderilmez</Text>
+              <Ionicons name="cloud-done" size={11} color={colors.moodNeutral} />
+              <Text style={styles.privacyBadgeText}>Cihaz İçi AI · Azure Bulut Kayıt</Text>
             </View>
           </View>
 
@@ -501,12 +501,12 @@ export const SettingsScreen: React.FC<Props> = React.memo(({
 
           <View style={[styles.infoRowBox, { marginTop: 10 }]}>
             <Text style={styles.infoLabel}>
-              {isAdmin ? 'Uygulama İçi Global Veriler' : 'Kişisel Hesap Verilerin'}
+              {isAdmin ? 'Azure Bulut Global Veriler' : 'Kişisel Bulut Verilerin'}
             </Text>
             <Text style={styles.infoValue}>
               {isAdmin
-                ? `${storageInfo.photoCount} fotoğraf · ${storageInfo.scanCount} tarama · ${storageInfo.trackCount} şarkı`
-                : `${stats.totalScans} tarama · ${stats.favoriteCount} favori · ${stats.catalogTotal} şarkı`}
+                ? `${storageInfo.photoCount} Blob fotoğraf · ${storageInfo.scanCount} tarama · ${storageInfo.trackCount} şarkı`
+                : `${stats.totalScans} tarama · ${stats.favoriteCount} favori · ${stats.catalogTotal} bulut şarkısı`}
             </Text>
           </View>
         </StaggeredEntry>
@@ -567,12 +567,12 @@ export const SettingsScreen: React.FC<Props> = React.memo(({
                 haptic
                 onPress={() => {
                   Alert.alert(
-                    'Tüm Yerel Verileri Sil',
-                    'Çekilen tüm fotoğraflar, tarama geçmişi, tüm hesaplar ve yerel müzik veritabanı telefondan kalıcı olarak silinecek. Devam edilsin mi?',
+                    'Bulut Kullanıcı Verilerini Sıfırla',
+                    'Tüm tarama geçmişi, Blob fotoğraflar, kullanıcılar (admin haluk hariç) ve playlistler Azure üzerinden sıfırlanacak. Paylaşılan şarkı kataloğu korunur. Devam edilsin mi?',
                     [
                       { text: 'Vazgeç', style: 'cancel' },
                       {
-                        text: 'Hepsini Sil',
+                        text: 'Sıfırla',
                         style: 'destructive',
                         onPress: onWipeAllData,
                       },
@@ -582,7 +582,7 @@ export const SettingsScreen: React.FC<Props> = React.memo(({
                 style={styles.dangerActionBtn}
               >
                 <Ionicons name="trash-outline" size={18} color={colors.danger} />
-                <Text style={styles.dangerActionText}>Tüm Yerel Verileri Sıfırla</Text>
+                <Text style={styles.dangerActionText}>Bulut Kullanıcı Verilerini Sıfırla</Text>
               </SpringPressable>
             )}
 

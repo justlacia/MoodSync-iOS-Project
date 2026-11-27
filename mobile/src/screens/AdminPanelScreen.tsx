@@ -30,6 +30,7 @@ import {
   adminListUsers,
   adminResetUserPassword,
   adminRunReadOnlyQuery,
+  adminSeedCloudCatalog,
   AdminScanSessionRecord,
   AdminTableName,
   AdminUserSummary,
@@ -62,7 +63,7 @@ const SUB_TAB_ORDER: AdminSubTab[] = ['overview', 'users', 'scans', 'database'];
 const SQL_PRESETS: Array<{ label: string; sql: string }> = [
   {
     label: 'Tablolar',
-    sql: "SELECT name, type FROM sqlite_master WHERE type IN ('table','index') ORDER BY type, name",
+    sql: "SELECT tablename AS name, 'table' AS type FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
   },
   {
     label: 'Kullanıcılar',
@@ -70,7 +71,7 @@ const SQL_PRESETS: Array<{ label: string; sql: string }> = [
   },
   {
     label: 'Son 15 Tarama',
-    sql: 'SELECT s.id, u.username, s.mood, s.emotion, ROUND(s.confidence*100) AS pct, s.created_at FROM scan_sessions s JOIN users u ON u.id = s.user_id ORDER BY s.created_at DESC LIMIT 15',
+    sql: 'SELECT s.id, u.username, s.mood, s.emotion, ROUND((s.confidence*100)::numeric) AS pct, s.created_at FROM scan_sessions s JOIN users u ON u.id = s.user_id ORDER BY s.created_at DESC LIMIT 15',
   },
   {
     label: 'Mod Özeti',
@@ -487,7 +488,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
   const handleDeleteTrack = (trackId: number, title: string) => {
     Alert.alert(
       'Şarkıyı Sil',
-      `"${title}" yerel tracks tablosundan silinsin mi?`,
+      `"${title}" Azure bulut şarkı kataloğundan silinsin mi?`,
       [
         { text: 'Vazgeç', style: 'cancel' },
         {
@@ -510,11 +511,32 @@ export const AdminPanelScreen: React.FC<Props> = ({
     Alert.alert(
       'Temizlik Tamamlandı',
       removed > 0
-        ? `${removed} adet sahipsiz fotoğraf sandbox'tan temizlendi.`
-        : 'Sahipsiz fotoğraf dosyası bulunamadı.'
+        ? `${removed} adet sahipsiz fotoğraf Azure Blob Storage'dan temizlendi.`
+        : 'Sahipsiz Blob fotoğraf dosyası bulunamadı.'
     );
     await loadAllAdminData();
     onDatabaseMutated();
+  };
+
+  const [seedingCloud, setSeedingCloud] = useState(false);
+
+  const handleSeedCloudCatalog = async () => {
+    if (seedingCloud) return;
+    setSeedingCloud(true);
+    try {
+      const res = await adminSeedCloudCatalog(12);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      Alert.alert(
+        'Bulut Kataloğu Güncellendi',
+        `${res.totalFetched} şarkı işlendi. Azure PostgreSQL kataloğunda toplam ${res.totalCatalog} şarkı bulunuyor.`
+      );
+      await loadAllAdminData();
+      onDatabaseMutated();
+    } catch (err: any) {
+      Alert.alert('Hata', err?.message || 'Bulut şarkı kataloğu genişletilemedi.');
+    } finally {
+      setSeedingCloud(false);
+    }
   };
 
   const handleRunSql = async () => {
@@ -648,16 +670,16 @@ export const AdminPanelScreen: React.FC<Props> = ({
                     accent: colors.moodAngry,
                   },
                   {
-                    label: 'Sandbox Fotoğraflar',
+                    label: 'Azure Blob Fotoğraflar',
                     value: String(overview.photoCount),
                     sub: formatBytes(overview.photoBytes),
                     icon: 'images-outline' as const,
                     accent: colors.moodNegative,
                   },
                   {
-                    label: 'SQLite Veritabanı',
+                    label: 'Azure PostgreSQL',
                     value: formatBytes(overview.dbBytes),
-                    sub: `${overview.tables.length} Tablo · WAL Modu`,
+                    sub: `${overview.tables.length} Tablo · Bulut SSL`,
                     icon: 'server-outline' as const,
                     accent: colors.brand,
                   },
@@ -763,23 +785,39 @@ export const AdminPanelScreen: React.FC<Props> = ({
                 <View style={styles.maintBtnCol}>
                   <SpringPressable
                     haptic
+                    disabled={seedingCloud}
+                    onPress={handleSeedCloudCatalog}
+                    style={[styles.maintSecondaryBtn, seedingCloud && { opacity: 0.65 }]}
+                  >
+                    {seedingCloud ? (
+                      <ActivityIndicator size="small" color={colors.brand} />
+                    ) : (
+                      <Ionicons name="cloud-download-outline" size={17} color={colors.brand} />
+                    )}
+                    <Text style={[styles.maintSecondaryText, { color: colors.brand }]}>
+                      {seedingCloud ? 'Bulut Kataloğu Genişletiliyor…' : 'Bulut Şarkı Havuzunu Genişlet'}
+                    </Text>
+                  </SpringPressable>
+
+                  <SpringPressable
+                    haptic
                     onPress={handleCleanOrphans}
                     style={styles.maintSecondaryBtn}
                   >
                     <Ionicons name="sparkles-outline" size={17} color={colors.inkPrimary} />
-                    <Text style={styles.maintSecondaryText}>Sahipsiz Fotoğrafları Temizle</Text>
+                    <Text style={styles.maintSecondaryText}>Sahipsiz Blob Fotoğrafları Temizle</Text>
                   </SpringPressable>
 
                   <SpringPressable
                     haptic
                     onPress={() => {
                       Alert.alert(
-                        'Tüm Veritabanını Sıfırla',
-                        'Tüm kullanıcılar (admin haluk sıfırlanarak yeniden oluşturulur), taramalar, fotoğraflar ve yerel şarkılar silinecek. Emin misin?',
+                        'Bulut Kullanıcı Verilerini Sıfırla',
+                        'Tüm kullanıcılar (admin haluk korunur), taramalar, Blob fotoğraflar ve playlistler silinecek. Paylaşılan şarkı kataloğu korunur. Emin misin?',
                         [
                           { text: 'Vazgeç', style: 'cancel' },
                           {
-                            text: 'Hepsini Sıfırla',
+                            text: 'Sıfırla',
                             style: 'destructive',
                             onPress: onWipeAllData,
                           },
@@ -789,7 +827,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
                     style={styles.maintDangerBtn}
                   >
                     <Ionicons name="trash-outline" size={17} color={colors.danger} />
-                    <Text style={styles.maintDangerText}>Tüm Veritabanını Sıfırla</Text>
+                    <Text style={styles.maintDangerText}>Bulut Kullanıcı Verilerini Sıfırla</Text>
                   </SpringPressable>
                 </View>
               </View>
@@ -1202,7 +1240,7 @@ export const AdminPanelScreen: React.FC<Props> = ({
               <View style={[styles.sectionCard, { marginTop: 14 }]}>
                 <Text style={styles.cardTitle}>SQL Sorgu Konsolu (Salt-Okunur)</Text>
                 <Text style={styles.cardSub}>
-                  SELECT, PRAGMA veya EXPLAIN sorguları ile yerel SQLite veritabanını doğrudan sorgula.
+                  SELECT, WITH veya EXPLAIN sorguları ile Azure PostgreSQL veritabanını doğrudan sorgula.
                 </Text>
 
                 <ScrollView

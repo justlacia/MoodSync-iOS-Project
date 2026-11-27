@@ -34,7 +34,6 @@ import {
   DashboardStats,
   deleteScanSession,
   dislikeTrack,
-  ensureRichCatalogSeeded,
   expandScanSessionTracks,
   getDashboardStats,
   getDatabase,
@@ -199,7 +198,6 @@ function MainAppContent() {
   activeSessionRef.current = activeSession;
   const selectedHistorySessionRef = useRef(selectedHistorySession);
   selectedHistorySessionRef.current = selectedHistorySession;
-  const richSeedStartedRef = useRef(false);
 
   // Audio preview state (expo-audio)
   const player = useAudioPlayer(null);
@@ -310,22 +308,6 @@ function MainAppContent() {
       refreshStorageInfo();
     }
   }, [activeTab, refreshStorageInfo, user]);
-
-  // Warm up rich song catalog after boot so Şarkılar shows many tracks immediately
-  useEffect(() => {
-    if (!dbReady || richSeedStartedRef.current) return;
-    richSeedStartedRef.current = true;
-    ensureRichCatalogSeeded(180)
-      .then((added) => {
-        if (added > 0) {
-          setPlaylistsRefreshTick((t) => t + 1);
-          if (userIdRef.current) {
-            void refreshUserWorkspace(userIdRef.current, true);
-          }
-        }
-      })
-      .catch(() => {});
-  }, [dbReady, refreshUserWorkspace]);
 
   const animateToTab = useCallback((next: TabKey) => {
     if (activeTabRef.current === next) return;
@@ -552,72 +534,80 @@ function MainAppContent() {
   const handleToggleFavorite = useCallback(async (trackId: number) => {
     const uid = userIdRef.current;
     if (!uid) return;
-    const liked = await toggleFavoriteTrack(uid, trackId);
+    try {
+      const liked = await toggleFavoriteTrack(uid, trackId);
 
-    setActiveSession((prev) => {
-      if (!prev?.tracks) return prev;
-      return {
-        ...prev,
-        tracks: prev.tracks.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)),
-      };
-    });
-    setSelectedHistorySession((prev) => {
-      if (!prev?.tracks) return prev;
-      return {
-        ...prev,
-        tracks: prev.tracks.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)),
-      };
-    });
-    setQueue((prev) => prev.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)));
-    setActionSheetState((prev) =>
-      prev && prev.track.id === trackId
-        ? { ...prev, track: { ...prev.track, isFavorite: liked } }
-        : prev
-    );
-    const dash = await getDashboardStats(uid);
-    setStats(dash);
+      setActiveSession((prev) => {
+        if (!prev?.tracks) return prev;
+        return {
+          ...prev,
+          tracks: prev.tracks.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)),
+        };
+      });
+      setSelectedHistorySession((prev) => {
+        if (!prev?.tracks) return prev;
+        return {
+          ...prev,
+          tracks: prev.tracks.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)),
+        };
+      });
+      setQueue((prev) => prev.map((t) => (t.id === trackId ? { ...t, isFavorite: liked } : t)));
+      setActionSheetState((prev) =>
+        prev && prev.track.id === trackId
+          ? { ...prev, track: { ...prev.track, isFavorite: liked } }
+          : prev
+      );
+      const dash = await getDashboardStats(uid);
+      setStats(dash);
+    } catch (err: any) {
+      Alert.alert('Bağlantı Hatası', err?.message || 'Favori durumu güncellenemedi.');
+    }
   }, []);
 
   const handleDislikeTrack = useCallback(
     async (track: TrackRecord) => {
       const uid = userIdRef.current;
       if (!uid) return;
-      await dislikeTrack(uid, track.id);
+      try {
+        await dislikeTrack(uid, track.id);
 
-      setActiveSession((prev) => {
-        if (!prev?.tracks) return prev;
-        const filtered = prev.tracks.filter((t) => t.id !== track.id);
-        return { ...prev, tracks: filtered, trackCount: filtered.length };
-      });
-      setSelectedHistorySession((prev) => {
-        if (!prev?.tracks) return prev;
-        const filtered = prev.tracks.filter((t) => t.id !== track.id);
-        return { ...prev, tracks: filtered, trackCount: filtered.length };
-      });
+        setActiveSession((prev) => {
+          if (!prev?.tracks) return prev;
+          const filtered = prev.tracks.filter((t) => t.id !== track.id);
+          return { ...prev, tracks: filtered, trackCount: filtered.length };
+        });
+        setSelectedHistorySession((prev) => {
+          if (!prev?.tracks) return prev;
+          const filtered = prev.tracks.filter((t) => t.id !== track.id);
+          return { ...prev, tracks: filtered, trackCount: filtered.length };
+        });
 
-      const curIdx = queueIdxRef.current;
-      const curQueue = queueRef.current;
-      const removedIndex = curQueue.findIndex((t) => t.id === track.id);
-      if (removedIndex !== -1) {
-        const nextQueue = curQueue.filter((t) => t.id !== track.id);
-        if (nextQueue.length === 0) {
-          player.pause();
-          playerSheetRef.current?.closeImmediate();
-          setQueue([]);
-          setQueueIdx(-1);
-        } else if (removedIndex === curIdx) {
-          const nextIdx = Math.min(curIdx, nextQueue.length - 1);
-          void handlePlayFromQueueRef.current(nextQueue, nextIdx, true);
-        } else {
-          setQueue(nextQueue);
-          if (removedIndex < curIdx) {
-            setQueueIdx(curIdx - 1);
+        const curIdx = queueIdxRef.current;
+        const curQueue = queueRef.current;
+        const removedIndex = curQueue.findIndex((t) => t.id === track.id);
+        if (removedIndex !== -1) {
+          const nextQueue = curQueue.filter((t) => t.id !== track.id);
+          if (nextQueue.length === 0) {
+            player.pause();
+            playerSheetRef.current?.closeImmediate();
+            setQueue([]);
+            setQueueIdx(-1);
+          } else if (removedIndex === curIdx) {
+            const nextIdx = Math.min(curIdx, nextQueue.length - 1);
+            void handlePlayFromQueueRef.current(nextQueue, nextIdx, true);
+          } else {
+            setQueue(nextQueue);
+            if (removedIndex < curIdx) {
+              setQueueIdx(curIdx - 1);
+            }
           }
         }
-      }
 
-      setPlaylistsRefreshTick((t) => t + 1);
-      await refreshUserWorkspace(uid, true);
+        setPlaylistsRefreshTick((t) => t + 1);
+        await refreshUserWorkspace(uid, true);
+      } catch (err: any) {
+        Alert.alert('Bağlantı Hatası', err?.message || 'Şarkı gizlenemedi.');
+      }
     },
     [player, refreshUserWorkspace]
   );
@@ -699,14 +689,18 @@ function MainAppContent() {
     }) => {
       const uid = userIdRef.current;
       if (!uid) return;
-      const updated = await updateScanSessionMoodOrStrategy({
-        ...params,
-        userId: uid,
-      });
-      if (!updated) return;
-      setActiveSession((prev) => (prev?.id === params.sessionId ? updated : prev));
-      setSelectedHistorySession((prev) => (prev?.id === params.sessionId ? updated : prev));
-      await refreshUserWorkspace(uid, true);
+      try {
+        const updated = await updateScanSessionMoodOrStrategy({
+          ...params,
+          userId: uid,
+        });
+        if (!updated) return;
+        setActiveSession((prev) => (prev?.id === params.sessionId ? updated : prev));
+        setSelectedHistorySession((prev) => (prev?.id === params.sessionId ? updated : prev));
+        await refreshUserWorkspace(uid, true);
+      } catch (err: any) {
+        Alert.alert('Bağlantı Hatası', err?.message || 'Mod bilgisi güncellenemedi.');
+      }
     },
     [refreshUserWorkspace]
   );
@@ -715,16 +709,20 @@ function MainAppContent() {
     async (sessionId: number, note: string, tags: string[]) => {
       const uid = userIdRef.current;
       if (!uid) return;
-      const updated = await updateScanSessionJournal({
-        sessionId,
-        userId: uid,
-        note,
-        tags,
-      });
-      if (!updated) return;
-      setActiveSession((prev) => (prev?.id === sessionId ? updated : prev));
-      setSelectedHistorySession((prev) => (prev?.id === sessionId ? updated : prev));
-      await refreshUserWorkspace(uid, true);
+      try {
+        const updated = await updateScanSessionJournal({
+          sessionId,
+          userId: uid,
+          note,
+          tags,
+        });
+        if (!updated) return;
+        setActiveSession((prev) => (prev?.id === sessionId ? updated : prev));
+        setSelectedHistorySession((prev) => (prev?.id === sessionId ? updated : prev));
+        await refreshUserWorkspace(uid, true);
+      } catch (err: any) {
+        Alert.alert('Bağlantı Hatası', err?.message || 'Günlük notu kaydedilemedi.');
+      }
     },
     [refreshUserWorkspace]
   );
@@ -733,12 +731,16 @@ function MainAppContent() {
     async (sessionId: number) => {
       const uid = userIdRef.current;
       if (!uid) return;
-      const full = await getScanSessionWithTracks(sessionId, uid);
-      if (full) {
-        setSelectedHistorySession(full);
-        if (activeTabRef.current !== 'history') {
-          switchTab('history');
+      try {
+        const full = await getScanSessionWithTracks(sessionId, uid);
+        if (full) {
+          setSelectedHistorySession(full);
+          if (activeTabRef.current !== 'history') {
+            switchTab('history');
+          }
         }
+      } catch (err: any) {
+        Alert.alert('Bağlantı Hatası', err?.message || 'Tarama detayı yüklenemedi.');
       }
     },
     [switchTab]
@@ -771,14 +773,18 @@ function MainAppContent() {
     async (sessionId: number) => {
       const uid = userIdRef.current;
       if (!uid) return;
-      await deleteScanSession(sessionId, uid);
-      if (activeSessionRef.current?.id === sessionId) {
-        setActiveSession(null);
+      try {
+        await deleteScanSession(sessionId, uid);
+        if (activeSessionRef.current?.id === sessionId) {
+          setActiveSession(null);
+        }
+        if (selectedHistorySessionRef.current?.id === sessionId) {
+          setSelectedHistorySession(null);
+        }
+        await refreshUserWorkspace(uid, true);
+      } catch (err: any) {
+        Alert.alert('Bağlantı Hatası', err?.message || 'Tarama silinemedi.');
       }
-      if (selectedHistorySessionRef.current?.id === sessionId) {
-        setSelectedHistorySession(null);
-      }
-      await refreshUserWorkspace(uid, true);
     },
     [refreshUserWorkspace]
   );
@@ -786,28 +792,36 @@ function MainAppContent() {
   const handleClearOwnHistory = useCallback(async () => {
     const uid = userIdRef.current;
     if (!uid) return;
-    await clearUserScanSessions(uid);
-    setActiveSession(null);
-    setSelectedHistorySession(null);
-    await refreshUserWorkspace(uid, true);
+    try {
+      await clearUserScanSessions(uid);
+      setActiveSession(null);
+      setSelectedHistorySession(null);
+      await refreshUserWorkspace(uid, true);
+    } catch (err: any) {
+      Alert.alert('Bağlantı Hatası', err?.message || 'Tarama geçmişi temizlenemedi.');
+    }
   }, [refreshUserWorkspace]);
 
   const handleWipeAllData = useCallback(async () => {
-    player.pause();
-    player.clearLockScreenControls();
-    clearLockScreenSkipCommands();
-    playerSheetRef.current?.closeImmediate();
-    setActionSheetState(null);
-    setPlaylistPickerState(null);
-    setQueue([]);
-    setQueueIdx(-1);
-    setActiveSession(null);
-    setSelectedHistorySession(null);
-    setSessions([]);
-    await wipeAllLocalData();
-    setUser(null);
-    resetTabsToStudio();
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    try {
+      await wipeAllLocalData();
+      player.pause();
+      player.clearLockScreenControls();
+      clearLockScreenSkipCommands();
+      playerSheetRef.current?.closeImmediate();
+      setActionSheetState(null);
+      setPlaylistPickerState(null);
+      setQueue([]);
+      setQueueIdx(-1);
+      setActiveSession(null);
+      setSelectedHistorySession(null);
+      setSessions([]);
+      setUser(null);
+      resetTabsToStudio();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    } catch (err: any) {
+      Alert.alert('Bağlantı Hatası', err?.message || 'Veritabanı sıfırlanamadı.');
+    }
   }, [player, resetTabsToStudio]);
 
   const handleDatabaseMutated = useCallback(() => {
@@ -938,7 +952,7 @@ function MainAppContent() {
               <Image source={appLogo} style={styles.headerLogo} />
               <View>
                 <Text style={styles.headerBrand}>MoodSync</Text>
-                <Text style={styles.headerSub}>{stats.catalogTotal} Online Şarkı</Text>
+                <Text style={styles.headerSub}>{stats.catalogTotal} Bulut Şarkısı</Text>
               </View>
             </View>
 

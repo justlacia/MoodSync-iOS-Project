@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="tr" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MoodSync Cloud · Web &amp; Admin Portalı</title>
+  <link rel="stylesheet" href="/styles.css?v=2" />
+</head>
+<body>
+  <!-- AUTH VIEW -->
+  <div id="auth-screen" class="auth-screen hidden">
+    <div class="auth-glow"></div>
+    <div class="auth-card glass-panel">
+      <div class="auth-brand">
+        <div class="brand-badge">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 18V5l12-2v13" />
+            <circle cx="6" cy="18" r="3" />
+            <circle cx="18" cy="16" r="3" />
+          </svg>
+        </div>
+        <h1>MoodSync Cloud</h1>
+        <p>Azure PostgreSQL, Gizli Blob Fotoğraflar &amp; 3.129+ Şarkı Kataloğu</p>
+      </div>
+
+      <div class="segmented" id="auth-mode-switch">
+        <button type="button" class="seg-btn active" data-mode="login">Giriş Yap</button>
+        <button type="button" class="seg-btn" data-mode="register">Kayıt Ol</button>
+      </div>
+
+      <form id="auth-form" class="auth-form">
+        <div class="field hidden" id="auth-displayname-wrap">
+          <label for="auth-displayname">Ad Soyad</label>
+          <input id="auth-displayname" type="text" placeholder="Örn: Haluk Albayrak" autocomplete="name" />
+        </div>
+        <div class="field">
+          <label for="auth-username">Kullanıcı Adı</label>
+          <input id="auth-username" type="text" placeholder="Kullanıcı adınız" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="auth-password">Şifre</label>
+          <input id="auth-password" type="password" placeholder="Şifreniz" autocomplete="current-password" required />
+        </div>
+
+        <div id="auth-error" class="alert-error hidden"></div>
+
+        <button type="submit" id="auth-submit-btn" class="btn-primary full-width">
+          Giriş Yap
+        </button>
+      </form>
+
+      <div class="auth-footer">
+        <span class="status-dot"></span>
+        <span>Azure Bulut Sunucusu · SSL Korumalı</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN PORTAL SHELL -->
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar glass-panel" id="sidebar">
+      <div class="sidebar-top">
+        <div class="logo-row">
+          <div class="logo-mark">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 18V5l12-2v13" />
+              <circle cx="6" cy="18" r="3" />
+              <circle cx="18" cy="16" r="3" />
+            </svg>
+          </div>
+          <div>
+            <div class="logo-title">MoodSync</div>
+            <div class="logo-sub" id="sidebar-catalog-badge">Azure Cloud</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="nav-scroll">
+        <div class="nav-group-label">KİŞİSEL ALANIM</div>
+        <button type="button" class="nav-item active" data-view="my-scans">
+          <span class="nav-icon">📸</span>
+          <span>Taramalarım</span>
+        </button>
+        <button type="button" class="nav-item" data-view="library">
+          <span class="nav-icon">🎵</span>
+          <span>Şarkılar</span>
+        </button>
+        <button type="button" class="nav-item" data-view="playlists">
+          <span class="nav-icon">💿</span>
+          <span>Listelerim</span>
+        </button>
+
+        <div id="admin-nav-section" class="hidden">
+          <div class="nav-group-label" style="margin-top: 18px;">ADMIN PANELİ</div>
+          <button type="button" class="nav-item" data-view="admin-overview">
+            <span class="nav-icon">📊</span>
+            <span>Genel Bakış</span>
+          </button>
+          <button type="button" class="nav-item" data-view="admin-users">
+            <span class="nav-icon">👥</span>
+            <span>Hesaplar</span>
+          </button>
+          <button type="button" class="nav-item" data-view="admin-scans">
+            <span class="nav-icon">🔍</span>
+            <span>Tüm Taramalar</span>
+          </button>
+          <button type="button" class="nav-item" data-view="admin-blobs">
+            <span class="nav-icon">🖼️</span>
+            <span>Fotoğraf Galerisi (Blob)</span>
+          </button>
+          <button type="button" class="nav-item" data-view="admin-tables">
+            <span class="nav-icon">🗄️</span>
+            <span>Tablo Gezgini</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="sidebar-bottom">
+        <div class="user-chip">
+          <div class="avatar" id="user-avatar">H</div>
+          <div class="user-meta">
+            <div class="user-name-row">
+              <span id="user-display-name">Haluk</span>
+              <span id="user-role-badge" class="role-badge hidden">ADMIN</span>
+            </div>
+            <div class="user-handle" id="user-handle">@haluk</div>
+          </div>
+        </div>
+        <div class="sidebar-actions">
+          <button type="button" id="theme-toggle-btn" class="btn-ghost btn-sm" title="Tema Değiştir">
+            🌓 Tema
+          </button>
+          <button type="button" id="logout-btn" class="btn-ghost btn-sm danger-text">
+            Çıkış
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="mobile-topbar glass-panel">
+        <div class="logo-row">
+          <div class="logo-mark sm">🎵</div>
+          <span class="logo-title">MoodSync</span>
+        </div>
+        <div class="topbar-right">
+          <button type="button" id="mobile-theme-btn" class="btn-ghost btn-sm">🌓</button>
+          <button type="button" id="mobile-logout-btn" class="btn-ghost btn-sm danger-text">Çıkış</button>
+        </div>
+      </header>
+
+      <main id="main-content" class="main-content">
+        <div class="loading-center">Yükleniyor…</div>
+      </main>
+    </div>
+  </div>
+
+  <!-- BOTTOM PERSISTENT AUDIO PLAYER -->
+  <div id="audio-player-bar" class="audio-bar glass-panel hidden">
+    <div class="audio-left">
+      <img id="player-art" class="player-art" src="" alt="" />
+      <div class="player-meta">
+        <div id="player-title" class="player-title">Şarkı Seçilmedi</div>
+        <div id="player-artist" class="player-artist">—</div>
+      </div>
+    </div>
+
+    <div class="audio-center">
+      <div class="player-controls">
+        <button type="button" id="player-prev-btn" class="icon-btn" title="Önceki">⏮</button>
+        <button type="button" id="player-play-btn" class="play-circle-btn" title="Çal / Duraklat">▶</button>
+        <button type="button" id="player-next-btn" class="icon-btn" title="Sonraki">⏭</button>
+        <button type="button" id="player-loop-btn" class="icon-btn" title="Tekrar Çal (Kapalı)" aria-pressed="false">🔁</button>
+      </div>
+      <div class="scrubber-row">
+        <span id="player-cur-time" class="time-text">0:00</span>
+        <input id="player-seek" type="range" min="0" max="30" step="0.2" value="0" class="seek-slider" aria-label="Şarkı konumu" />
+        <span id="player-dur-time" class="time-text">0:30</span>
+      </div>
+    </div>
+
+    <div class="audio-right">
+      <div class="volume-control" id="player-volume-wrap" title="Ses Seviyesi (Tekerlek ile ayarlanabilir)">
+        <button type="button" id="player-mute-btn" class="icon-btn" title="Sessize Al (M)" aria-label="Sessize al veya sesi aç">🔊</button>
+        <input id="player-volume" type="range" min="0" max="100" step="1" value="75" class="volume-slider" aria-label="Ses seviyesi" />
+        <span id="player-volume-pct" class="volume-pct">75%</span>
+      </div>
+      <button type="button" id="player-fav-btn" class="icon-btn" title="Favorile">♡</button>
+      <a id="player-apple-link" class="ext-pill" href="#" target="_blank" rel="noopener noreferrer">Apple</a>
+      <a id="player-spotify-link" class="ext-pill" href="#" target="_blank" rel="noopener noreferrer">Spotify</a>
+      <a id="player-yt-link" class="ext-pill" href="#" target="_blank" rel="noopener noreferrer">YT</a>
+      <button type="button" id="player-close-btn" class="icon-btn" title="Kapat">✕</button>
+    </div>
+    <audio id="html-audio" preload="none"></audio>
+  </div>
+
+  <!-- GENERIC MODAL -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal-dialog glass-panel" id="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-title">Detay</h3>
+        <button type="button" id="modal-close-btn" class="icon-btn">✕</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- LIGHTBOX PHOTO ZOOM -->
+  <div id="lightbox-overlay" class="lightbox-overlay hidden">
+    <button type="button" id="lightbox-close-btn" class="lightbox-close">✕</button>
+    <img id="lightbox-img" class="lightbox-img" src="" alt="Fotoğraf" />
+    <div id="lightbox-caption" class="lightbox-caption"></div>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/app.js?v=2"></script>
+</body>
+</html>
